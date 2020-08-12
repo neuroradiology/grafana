@@ -29,7 +29,7 @@ func init() {
 
 // CacheStorage allows the caller to set, get and delete items in the cache.
 // Cached items are stored as byte arrays and marshalled using "encoding/gob"
-// so any struct added to the cache needs to be registred with `remotecache.Register`
+// so any struct added to the cache needs to be registered with `remotecache.Register`
 // ex `remotecache.Register(CacheableStruct{})``
 type CacheStorage interface {
 	// Get reads object from Cache
@@ -91,7 +91,7 @@ func (ds *RemoteCache) Run(ctx context.Context) error {
 
 func createClient(opts *setting.RemoteCacheOptions, sqlstore *sqlstore.SqlStore) (CacheStorage, error) {
 	if opts.Name == redisCacheType {
-		return newRedisStorage(opts), nil
+		return newRedisStorage(opts)
 	}
 
 	if opts.Name == memcachedCacheType {

@@ -14,16 +14,25 @@ func init() {
 		Type:        "teams",
 		Name:        "Microsoft Teams",
 		Description: "Sends notifications using Incoming Webhook connector to Microsoft Teams",
+		Heading:     "Teams settings",
 		Factory:     NewTeamsNotifier,
 		OptionsTemplate: `
       <h3 class="page-heading">Teams settings</h3>
       <div class="gf-form max-width-30">
         <span class="gf-form-label width-6">Url</span>
-        <input type="text" required class="gf-form-input max-width-30" ng-model="ctrl.model.settings.url" placeholder="Teams incoming webhook url"></input>
+        <input type="text" InputType class="gf-form-input max-width-30" ng-model="ctrl.model.settings.url" placeholder="Teams incoming webhook url"></input>
       </div>
     `,
+		Options: []alerting.NotifierOption{
+			{
+				Label:        "URL",
+				Element:      alerting.ElementTypeInput,
+				InputType:    alerting.InputTypeText,
+				Placeholder:  "Teams incoming webhook url",
+				PropertyName: "url",
+			},
+		},
 	})
-
 }
 
 // NewTeamsNotifier is the constructor for Teams notifier.
@@ -50,9 +59,9 @@ type TeamsNotifier struct {
 
 // Notify send an alert notification to Microsoft teams.
 func (tn *TeamsNotifier) Notify(evalContext *alerting.EvalContext) error {
-	tn.log.Info("Executing teams notification", "ruleId", evalContext.Rule.Id, "notification", tn.Name)
+	tn.log.Info("Executing teams notification", "ruleId", evalContext.Rule.ID, "notification", tn.Name)
 
-	ruleURL, err := evalContext.GetRuleUrl()
+	ruleURL, err := evalContext.GetRuleURL()
 	if err != nil {
 		tn.log.Error("Failed get rule link", "error", err)
 		return err
@@ -83,9 +92,9 @@ func (tn *TeamsNotifier) Notify(evalContext *alerting.EvalContext) error {
 	}
 
 	images := make([]map[string]interface{}, 0)
-	if evalContext.ImagePublicUrl != "" {
+	if tn.NeedsImage() && evalContext.ImagePublicURL != "" {
 		images = append(images, map[string]interface{}{
-			"image": evalContext.ImagePublicUrl,
+			"image": evalContext.ImagePublicURL,
 		})
 	}
 
@@ -122,7 +131,7 @@ func (tn *TeamsNotifier) Notify(evalContext *alerting.EvalContext) error {
 				"name":     "View Graph",
 				"targets": []map[string]interface{}{
 					{
-						"os": "default", "uri": evalContext.ImagePublicUrl,
+						"os": "default", "uri": evalContext.ImagePublicURL,
 					},
 				},
 			},

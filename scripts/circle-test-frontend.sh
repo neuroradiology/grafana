@@ -1,20 +1,16 @@
 #!/bin/bash
 
-function exit_if_fail {
-    command=$@
-    echo "Executing '$command'"
-    eval $command
-    rc=$?
-    if [ $rc -ne 0 ]; then
-        echo "'$command' returned $rc."
-        exit $rc
-    fi
-}
+# shellcheck source=./scripts/helpers/exit-if-fail.sh
+source "$(dirname "$0")/helpers/exit-if-fail.sh"
 
 start=$(date +%s)
 
-exit_if_fail npm run prettier:check
-exit_if_fail npm run test
+export TEST_MAX_WORKERS=2
+
+exit_if_fail yarn run prettier:check
+exit_if_fail yarn run packages:typecheck
+exit_if_fail yarn run typecheck
+exit_if_fail yarn run test
 
 end=$(date +%s)
 seconds=$((end - start))

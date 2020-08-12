@@ -1,9 +1,10 @@
 # grafana-build-container
-Grafana build container
 
-## Description
+These are the sources for the Docker image that we use for the Grafana build containers. The image source itself
+is in Dockerfile, but there are supporting scripts such as the Makefile, for building images.
 
-This is a container for cross-platform builds of Grafana. You can run it locally using the Makefile.
+The image is based on Debian Stretch, since we want an older Linux distribution (Stretch has long-term support into
+2022) to build binaries that are as portable as possible.
 
 ## Makefile targets
 
@@ -18,3 +19,6 @@ This is a container for cross-platform builds of Grafana. You can run it locally
 * `make attach`
   - Opens bash within the running container
 
+## Build/Publish Docker Image
+In order to build and publish the Grafana build Docker image, execute the following:
+`./build-deploy.sh`.

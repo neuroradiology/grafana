@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-stack/stack"
 	"github.com/grafana/grafana/pkg/util"
+	"github.com/grafana/grafana/pkg/util/errutil"
 	"github.com/inconshreveable/log15"
 	isatty "github.com/mattn/go-isatty"
 	"gopkg.in/ini.v1"
@@ -35,7 +36,14 @@ func New(logger string, ctx ...interface{}) Logger {
 	return Root.New(params...)
 }
 
-func Trace(format string, v ...interface{}) {
+// NewWithLevel returns a new logger with a certain level.
+func NewWithLevel(name string, level log15.Lvl) Logger {
+	logger := Root.New("logger", name)
+	logger.SetHandler(log15.LvlFilterHandler(level, log15.StreamHandler(os.Stdout, getLogFormat("console"))))
+	return logger
+}
+
+func Tracef(format string, v ...interface{}) {
 	var message string
 	if len(v) > 0 {
 		message = fmt.Sprintf(format, v...)
@@ -46,7 +54,7 @@ func Trace(format string, v ...interface{}) {
 	Root.Debug(message)
 }
 
-func Debug(format string, v ...interface{}) {
+func Debugf(format string, v ...interface{}) {
 	var message string
 	if len(v) > 0 {
 		message = fmt.Sprintf(format, v...)
@@ -57,7 +65,7 @@ func Debug(format string, v ...interface{}) {
 	Root.Debug(message)
 }
 
-func Info(format string, v ...interface{}) {
+func Infof(format string, v ...interface{}) {
 	var message string
 	if len(v) > 0 {
 		message = fmt.Sprintf(format, v...)
@@ -68,7 +76,7 @@ func Info(format string, v ...interface{}) {
 	Root.Info(message)
 }
 
-func Warn(format string, v ...interface{}) {
+func Warnf(format string, v ...interface{}) {
 	var message string
 	if len(v) > 0 {
 		message = fmt.Sprintf(format, v...)
@@ -79,15 +87,15 @@ func Warn(format string, v ...interface{}) {
 	Root.Warn(message)
 }
 
-func Error(skip int, format string, v ...interface{}) {
+func Errorf(skip int, format string, v ...interface{}) {
 	Root.Error(fmt.Sprintf(format, v...))
 }
 
-func Critical(skip int, format string, v ...interface{}) {
+func Criticalf(skip int, format string, v ...interface{}) {
 	Root.Crit(fmt.Sprintf(format, v...))
 }
 
-func Fatal(skip int, format string, v ...interface{}) {
+func Fatalf(skip int, format string, v ...interface{}) {
 	Root.Crit(fmt.Sprintf(format, v...))
 	Close()
 	os.Exit(1)
@@ -181,7 +189,7 @@ func getLogFormat(format string) log15.Format {
 	}
 }
 
-func ReadLoggingConfig(modes []string, logsPath string, cfg *ini.File) {
+func ReadLoggingConfig(modes []string, logsPath string, cfg *ini.File) error {
 	Close()
 
 	defaultLevelName, _ := getLogLevelFromConfig("log", "info", cfg)
@@ -194,6 +202,7 @@ func ReadLoggingConfig(modes []string, logsPath string, cfg *ini.File) {
 		sec, err := cfg.GetSection("log." + mode)
 		if err != nil {
 			Root.Error("Unknown log mode", "mode", mode)
+			return errutil.Wrapf(err, "failed to get config section log.%s", mode)
 		}
 
 		// Log level.
@@ -209,7 +218,11 @@ func ReadLoggingConfig(modes []string, logsPath string, cfg *ini.File) {
 			handler = log15.StreamHandler(os.Stdout, format)
 		case "file":
 			fileName := sec.Key("file_name").MustString(filepath.Join(logsPath, "grafana.log"))
-			os.MkdirAll(filepath.Dir(fileName), os.ModePerm)
+			dpath := filepath.Dir(fileName)
+			if err := os.MkdirAll(dpath, os.ModePerm); err != nil {
+				Root.Error("Failed to create directory", "dpath", dpath, "err", err)
+				return errutil.Wrapf(err, "failed to create log directory %q", dpath)
+			}
 			fileHandler := NewFileWriter()
 			fileHandler.Filename = fileName
 			fileHandler.Format = format
@@ -218,7 +231,10 @@ func ReadLoggingConfig(modes []string, logsPath string, cfg *ini.File) {
 			fileHandler.Maxsize = 1 << uint(sec.Key("max_size_shift").MustInt(28))
 			fileHandler.Daily = sec.Key("daily_rotate").MustBool(true)
 			fileHandler.Maxdays = sec.Key("max_days").MustInt64(7)
-			fileHandler.Init()
+			if err := fileHandler.Init(); err != nil {
+				Root.Error("Failed to initialize file handler", "dpath", dpath, "err", err)
+				return errutil.Wrapf(err, "failed to initialize file handler")
+			}
 
 			loggersToClose = append(loggersToClose, fileHandler)
 			loggersToReload = append(loggersToReload, fileHandler)
@@ -228,6 +244,9 @@ func ReadLoggingConfig(modes []string, logsPath string, cfg *ini.File) {
 
 			loggersToClose = append(loggersToClose, sysLogHandler)
 			handler = sysLogHandler
+		}
+		if handler == nil {
+			panic(fmt.Sprintf("Handler is uninitialized for mode %q", mode))
 		}
 
 		for key, value := range defaultFilters {
@@ -247,11 +266,11 @@ func ReadLoggingConfig(modes []string, logsPath string, cfg *ini.File) {
 	}
 
 	Root.SetHandler(log15.MultiHandler(handlers...))
+	return nil
 }
 
 func LogFilterHandler(maxLevel log15.Lvl, filters map[string]log15.Lvl, h log15.Handler) log15.Handler {
 	return log15.FilterHandler(func(r *log15.Record) (pass bool) {
-
 		if len(filters) > 0 {
 			for i := 0; i < len(r.Ctx); i += 2 {
 				key, ok := r.Ctx[i].(string)

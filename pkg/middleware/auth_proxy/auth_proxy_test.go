@@ -6,15 +6,15 @@ import (
 	"net/http"
 	"testing"
 
-	. "github.com/smartystreets/goconvey/convey"
-	"gopkg.in/macaron.v1"
-
 	"github.com/grafana/grafana/pkg/bus"
+	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/infra/remotecache"
 	"github.com/grafana/grafana/pkg/models"
 	"github.com/grafana/grafana/pkg/services/ldap"
 	"github.com/grafana/grafana/pkg/services/multildap"
 	"github.com/grafana/grafana/pkg/setting"
+	. "github.com/smartystreets/goconvey/convey"
+	"gopkg.in/macaron.v1"
 )
 
 type TestMultiLDAP struct {
@@ -36,46 +36,80 @@ func (stub *TestMultiLDAP) Login(query *models.LoginUserQuery) (
 
 func (stub *TestMultiLDAP) User(login string) (
 	*models.ExternalUserInfo,
+	ldap.ServerConfig,
 	error,
 ) {
 	stub.userCalled = true
 	result := &models.ExternalUserInfo{
 		UserId: stub.ID,
 	}
-	return result, nil
+	return result, ldap.ServerConfig{}, nil
+}
+
+func prepareMiddleware(t *testing.T, req *http.Request, store *remotecache.RemoteCache) *AuthProxy {
+	t.Helper()
+
+	ctx := &models.ReqContext{
+		Context: &macaron.Context{
+			Req: macaron.Request{
+				Request: req,
+			},
+		},
+	}
+
+	auth := New(&Options{
+		Store: store,
+		Ctx:   ctx,
+		OrgID: 4,
+	})
+
+	return auth
 }
 
 func TestMiddlewareContext(t *testing.T) {
+	logger := log.New("test")
 	Convey("auth_proxy helper", t, func() {
-		req, _ := http.NewRequest("POST", "http://example.com", nil)
+		req, err := http.NewRequest("POST", "http://example.com", nil)
+		So(err, ShouldBeNil)
 		setting.AuthProxyHeaderName = "X-Killa"
-		name := "markelog"
+		store := remotecache.NewFakeStore(t)
 
+		name := "markelog"
 		req.Header.Add(setting.AuthProxyHeaderName, name)
 
-		ctx := &models.ReqContext{
-			Context: &macaron.Context{
-				Req: macaron.Request{
-					Request: req,
-				},
-			},
-		}
+		Convey("when the cache only contains the main header", func() {
+			Convey("with a simple cache key", func() {
+				// Set cache key
+				key := fmt.Sprintf(CachePrefix, HashCacheKey(name))
+				err := store.Set(key, int64(33), 0)
+				So(err, ShouldBeNil)
 
-		Convey("logs in user from the cache", func() {
-			store := remotecache.NewFakeStore(t)
-			key := fmt.Sprintf(CachePrefix, name)
-			store.Set(key, int64(33), 0)
+				// Set up the middleware
+				auth := prepareMiddleware(t, req, store)
+				So(auth.getKey(), ShouldEqual, "auth-proxy-sync-ttl:0a7f3374e9659b10980fd66247b0cf2f")
 
-			auth := New(&Options{
-				Store: store,
-				Ctx:   ctx,
-				OrgID: 4,
+				id, err := auth.Login(logger, false)
+				So(err, ShouldBeNil)
+
+				So(id, ShouldEqual, 33)
 			})
 
-			id, err := auth.Login()
+			Convey("when the cache key contains additional headers", func() {
+				setting.AuthProxyHeaders = map[string]string{"Groups": "X-WEBAUTH-GROUPS"}
+				group := "grafana-core-team"
+				req.Header.Add("X-WEBAUTH-GROUPS", group)
 
-			So(err, ShouldBeNil)
-			So(id, ShouldEqual, 33)
+				key := fmt.Sprintf(CachePrefix, HashCacheKey(name+"-"+group))
+				err := store.Set(key, int64(33), 0)
+				So(err, ShouldBeNil)
+
+				auth := prepareMiddleware(t, req, store)
+				So(auth.getKey(), ShouldEqual, "auth-proxy-sync-ttl:14f69b7023baa0ac98c96b31cec07bc0")
+
+				id, err := auth.Login(logger, false)
+				So(err, ShouldBeNil)
+				So(id, ShouldEqual, 33)
+			})
 		})
 
 		Convey("LDAP", func() {
@@ -119,13 +153,9 @@ func TestMiddlewareContext(t *testing.T) {
 
 				store := remotecache.NewFakeStore(t)
 
-				server := New(&Options{
-					Store: store,
-					Ctx:   ctx,
-					OrgID: 4,
-				})
+				auth := prepareMiddleware(t, req, store)
 
-				id, err := server.Login()
+				id, err := auth.Login(logger, false)
 
 				So(err, ShouldBeNil)
 				So(id, ShouldEqual, 42)
@@ -149,11 +179,7 @@ func TestMiddlewareContext(t *testing.T) {
 
 				store := remotecache.NewFakeStore(t)
 
-				auth := New(&Options{
-					Store: store,
-					Ctx:   ctx,
-					OrgID: 4,
-				})
+				auth := prepareMiddleware(t, req, store)
 
 				stub := &TestMultiLDAP{
 					ID: 42,
@@ -163,14 +189,13 @@ func TestMiddlewareContext(t *testing.T) {
 					return stub
 				}
 
-				id, err := auth.Login()
+				id, err := auth.Login(logger, false)
 
 				So(err, ShouldNotBeNil)
-				So(err.Error(), ShouldContainSubstring, "Failed to get the user")
+				So(err.Error(), ShouldContainSubstring, "failed to get the user")
 				So(id, ShouldNotEqual, 42)
 				So(stub.loginCalled, ShouldEqual, false)
 			})
-
 		})
 	})
 }

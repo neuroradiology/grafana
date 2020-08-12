@@ -13,10 +13,10 @@ jest.mock('app/core/core', () => {
   };
 });
 
-/* tslint:disable:import-blacklist */
-import System from 'systemjs/dist/system.js';
+import { SystemJS } from '@grafana/runtime';
+import { AppPluginMeta, PluginMetaInfo, PluginType, AppPlugin } from '@grafana/data';
 
-import { AppPluginMeta, PluginMetaInfo, PluginType, AppPlugin } from '@grafana/ui';
+// Loaded after the `unmock` abve
 import { importAppPlugin } from './plugin_loader';
 
 class MyCustomApp extends AppPlugin {
@@ -34,11 +34,11 @@ describe('Load App', () => {
   const modulePath = 'my/custom/plugin/module';
 
   beforeAll(() => {
-    System.set(modulePath, System.newModule({ plugin: app }));
+    SystemJS.set(modulePath, SystemJS.newModule({ plugin: app }));
   });
 
   afterAll(() => {
-    System.delete(modulePath);
+    SystemJS.delete(modulePath);
   });
 
   it('should call init and set meta', async () => {
@@ -52,7 +52,7 @@ describe('Load App', () => {
     };
 
     // Check that we mocked the import OK
-    const m = await System.import(modulePath);
+    const m = await SystemJS.import(modulePath);
     expect(m.plugin).toBe(app);
 
     const loaded = await importAppPlugin(meta);

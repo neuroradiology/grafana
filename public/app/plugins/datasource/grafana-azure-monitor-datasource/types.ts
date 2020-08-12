@@ -1,11 +1,23 @@
-import { DataQuery, DataSourceJsonData } from '@grafana/ui/src/types';
+import { DataQuery, DataSourceJsonData, DataSourceSettings, TableData } from '@grafana/data';
+
+export type AzureDataSourceSettings = DataSourceSettings<AzureDataSourceJsonData, AzureDataSourceSecureJsonData>;
+
+export enum AzureQueryType {
+  AzureMonitor = 'Azure Monitor',
+  ApplicationInsights = 'Application Insights',
+  InsightsAnalytics = 'Insights Analytics',
+  LogAnalytics = 'Azure Log Analytics',
+}
 
 export interface AzureMonitorQuery extends DataQuery {
+  queryType: AzureQueryType;
   format: string;
   subscription: string;
+
   azureMonitor: AzureMetricQuery;
   azureLogAnalytics: AzureLogsQuery;
-  //   appInsights: any;
+  appInsights: ApplicationInsightsQuery;
+  insightsAnalytics: InsightsAnalyticsQuery;
 }
 
 export interface AzureDataSourceJsonData extends DataSourceJsonData {
@@ -20,31 +32,79 @@ export interface AzureDataSourceJsonData extends DataSourceJsonData {
   logAnalyticsSubscriptionId?: string;
   logAnalyticsTenantId?: string;
   logAnalyticsClientId?: string;
-  azureLogAnalyticsSameAs?: string;
+  azureLogAnalyticsSameAs?: boolean;
   logAnalyticsDefaultWorkspace?: string;
 
   // App Insights
   appInsightsAppId?: string;
 }
 
+export interface AzureDataSourceSecureJsonData {
+  clientSecret?: string;
+  logAnalyticsClientSecret?: string;
+  appInsightsApiKey?: string;
+}
+
+export interface AzureMetricDimension {
+  dimension: string;
+  operator: 'eq'; // future proof
+  filter?: string; // *
+}
+
 export interface AzureMetricQuery {
   resourceGroup: string;
   resourceName: string;
   metricDefinition: string;
+  metricNamespace: string;
   metricName: string;
   timeGrainUnit: string;
   timeGrain: string;
-  timeGrains: string[];
+  allowedTimeGrainsMs: number[];
   aggregation: string;
-  dimension: string;
-  dimensionFilter: string;
+  dimensionFilters: AzureMetricDimension[];
   alias: string;
+  top: string;
 }
 
 export interface AzureLogsQuery {
   query: string;
   resultFormat: string;
   workspace: string;
+}
+
+export interface ApplicationInsightsQuery {
+  metricName: string;
+  timeGrainUnit: string;
+  timeGrain: string;
+  allowedTimeGrainsMs: number[];
+  aggregation: string;
+  dimension: string[]; // Was string before 7.1
+  // dimensions: string[]; why is this metadata stored on the object!
+  dimensionFilter: string;
+  alias: string;
+}
+
+export interface InsightsAnalyticsQuery {
+  query: string;
+  resultFormat: string;
+}
+
+// Azure Monitor API Types
+
+export interface AzureMonitorMetricDefinitionsResponse {
+  data: {
+    value: Array<{ name: string; type: string; location?: string }>;
+  };
+  status: number;
+  statusText: string;
+}
+
+export interface AzureMonitorResourceGroupsResponse {
+  data: {
+    value: Array<{ name: string }>;
+  };
+  status: number;
+  statusText: string;
 }
 
 // Azure Log Analytics types
@@ -83,14 +143,10 @@ export interface AzureLogsVariable {
   value: string;
 }
 
-export interface AzureLogsTableData {
+export interface AzureLogsTableData extends TableData {
   columns: AzureLogsTableColumn[];
   rows: any[];
   type: string;
-  refId: string;
-  meta: {
-    query: string;
-  };
 }
 
 export interface AzureLogsTableColumn {

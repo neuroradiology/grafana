@@ -1,93 +1,141 @@
-// Libraries
-import React, { ComponentClass } from 'react';
+import React from 'react';
 import { hot } from 'react-hot-loader';
-// @ts-ignore
+import { css, cx } from 'emotion';
+import { compose } from 'redux';
 import { connect } from 'react-redux';
-import _ from 'lodash';
-import { AutoSizer } from 'react-virtualized';
+import AutoSizer from 'react-virtualized-auto-sizer';
+import memoizeOne from 'memoize-one';
+import { selectors } from '@grafana/e2e-selectors';
+import { ErrorBoundaryAlert, stylesFactory, withTheme } from '@grafana/ui';
+import {
+  AbsoluteTimeRange,
+  DataQuery,
+  DataSourceApi,
+  GrafanaTheme,
+  GraphSeriesXY,
+  LoadingState,
+  PanelData,
+  RawTimeRange,
+  TimeRange,
+  TimeZone,
+  ExploreUIState,
+  ExploreUrlState,
+  LogsModel,
+} from '@grafana/data';
 
-// Services & Utils
 import store from 'app/core/store';
-
-// Components
-import { Alert } from './Error';
-import ErrorBoundary from './ErrorBoundary';
-import GraphContainer from './GraphContainer';
 import LogsContainer from './LogsContainer';
 import QueryRows from './QueryRows';
 import TableContainer from './TableContainer';
-import TimePicker from './TimePicker';
-
-// Actions
+import RichHistoryContainer from './RichHistory/RichHistoryContainer';
+import ExploreQueryInspector from './ExploreQueryInspector';
 import {
+  addQueryRow,
   changeSize,
-  changeTime,
   initializeExplore,
   modifyQueries,
+  refreshExplore,
   scanStart,
   setQueries,
-  refreshExplore,
-  reconnectDatasource,
+  toggleGraph,
+  updateTimeRange,
 } from './state/actions';
 
-// Types
-import { RawTimeRange, DataQuery, ExploreStartPageProps, ExploreDataSourceApi, DataQueryError } from '@grafana/ui';
-import {
-  ExploreItemState,
-  ExploreUrlState,
-  RangeScanner,
-  ExploreId,
-  ExploreUpdateState,
-  ExploreUIState,
-  ExploreMode,
-} from 'app/types/explore';
+import { ExploreId, ExploreItemState, ExploreUpdateState } from 'app/types/explore';
 import { StoreState } from 'app/types';
 import {
-  LAST_USED_DATASOURCE_KEY,
-  ensureQueries,
   DEFAULT_RANGE,
   DEFAULT_UI_STATE,
+  ensureQueries,
+  getFirstNonQueryRowSpecificError,
+  getTimeRange,
   getTimeRangeFromUrl,
+  lastUsedDatasourceKeyForOrgId,
 } from 'app/core/utils/explore';
 import { Emitter } from 'app/core/utils/emitter';
 import { ExploreToolbar } from './ExploreToolbar';
-import { scanStopAction } from './state/actionTypes';
 import { NoDataSourceCallToAction } from './NoDataSourceCallToAction';
-import { FadeIn } from 'app/core/components/Animations/FadeIn';
 import { getTimeZone } from '../profile/state/selectors';
 import { ErrorContainer } from './ErrorContainer';
+import { scanStopAction } from './state/actionTypes';
+import { ExploreGraphPanel } from './ExploreGraphPanel';
+//TODO:unification
+import { TraceView } from './TraceView/TraceView';
+import { SecondaryActions } from './SecondaryActions';
+import { FILTER_FOR_OPERATOR, FILTER_OUT_OPERATOR, FilterItem } from '@grafana/ui/src/components/Table/types';
 
-interface ExploreProps {
-  StartPage?: ComponentClass<ExploreStartPageProps>;
+const getStyles = stylesFactory((theme: GrafanaTheme) => {
+  return {
+    logsMain: css`
+      label: logsMain;
+      // Is needed for some transition animations to work.
+      position: relative;
+      margin-top: 21px;
+    `,
+    button: css`
+      label: button;
+      margin: 1em 4px 0 0;
+    `,
+    queryContainer: css`
+      label: queryContainer;
+      // Need to override normal css class and don't want to count on ordering of the classes in html.
+      height: auto !important;
+      flex: unset !important;
+      padding: ${theme.panelPadding}px;
+    `,
+  };
+});
+
+export interface ExploreProps {
   changeSize: typeof changeSize;
-  changeTime: typeof changeTime;
-  datasourceError: string;
-  datasourceInstance: ExploreDataSourceApi;
-  datasourceLoading: boolean | null;
+  datasourceInstance: DataSourceApi | null;
   datasourceMissing: boolean;
   exploreId: ExploreId;
   initializeExplore: typeof initializeExplore;
   initialized: boolean;
   modifyQueries: typeof modifyQueries;
   update: ExploreUpdateState;
-  reconnectDatasource: typeof reconnectDatasource;
   refreshExplore: typeof refreshExplore;
-  scanner?: RangeScanner;
   scanning?: boolean;
   scanRange?: RawTimeRange;
   scanStart: typeof scanStart;
   scanStopAction: typeof scanStopAction;
   setQueries: typeof setQueries;
   split: boolean;
-  showingStartPage?: boolean;
   queryKeys: string[];
   initialDatasource: string;
   initialQueries: DataQuery[];
-  initialRange: RawTimeRange;
+  initialRange: TimeRange;
   initialUI: ExploreUIState;
-  queryErrors: DataQueryError[];
-  mode: ExploreMode;
   isLive: boolean;
+  syncedTimes: boolean;
+  updateTimeRange: typeof updateTimeRange;
+  graphResult?: GraphSeriesXY[] | null;
+  logsResult?: LogsModel;
+  loading?: boolean;
+  absoluteRange: AbsoluteTimeRange;
+  showingGraph?: boolean;
+  showingTable?: boolean;
+  timeZone?: TimeZone;
+  onHiddenSeriesChanged?: (hiddenSeries: string[]) => void;
+  toggleGraph: typeof toggleGraph;
+  queryResponse: PanelData;
+  originPanelId: number;
+  addQueryRow: typeof addQueryRow;
+  theme: GrafanaTheme;
+  showMetrics: boolean;
+  showTable: boolean;
+  showLogs: boolean;
+  showTrace: boolean;
+}
+
+enum ExploreDrawer {
+  RichHistory,
+  QueryInspector,
+}
+
+interface ExploreState {
+  openDrawer?: ExploreDrawer;
 }
 
 /**
@@ -114,22 +162,28 @@ interface ExploreProps {
  * The result viewers determine some of the query options sent to the datasource, e.g.,
  * `format`, to indicate eventual transformations by the datasources' result transformers.
  */
-export class Explore extends React.PureComponent<ExploreProps> {
+export class Explore extends React.PureComponent<ExploreProps, ExploreState> {
   el: any;
   exploreEvents: Emitter;
-  /**
-   * Timepicker to control scanning
-   */
-  timepickerRef: React.RefObject<TimePicker>;
 
   constructor(props: ExploreProps) {
     super(props);
     this.exploreEvents = new Emitter();
-    this.timepickerRef = React.createRef();
+    this.state = {
+      openDrawer: undefined,
+    };
   }
 
   componentDidMount() {
-    const { initialized, exploreId, initialDatasource, initialQueries, initialRange, initialUI } = this.props;
+    const {
+      initialized,
+      exploreId,
+      initialDatasource,
+      initialQueries,
+      initialRange,
+      initialUI,
+      originPanelId,
+    } = this.props;
     const width = this.el ? this.el.offsetWidth : 0;
 
     // initialize the whole explore first time we mount and if browser history contains a change in datasource
@@ -141,7 +195,8 @@ export class Explore extends React.PureComponent<ExploreProps> {
         initialRange,
         width,
         this.exploreEvents,
-        initialUI
+        initialUI,
+        originPanelId
       );
     }
   }
@@ -158,11 +213,9 @@ export class Explore extends React.PureComponent<ExploreProps> {
     this.el = el;
   };
 
-  onChangeTime = (range: RawTimeRange, changedByScanner?: boolean) => {
-    if (this.props.scanning && !changedByScanner) {
-      this.onStopScanning();
-    }
-    this.props.changeTime(this.props.exploreId, range);
+  onChangeTime = (rawRange: RawTimeRange) => {
+    const { updateTimeRange, exploreId } = this.props;
+    updateTimeRange({ exploreId, rawRange });
   };
 
   // Use this in help pages to set page to a single query
@@ -170,15 +223,36 @@ export class Explore extends React.PureComponent<ExploreProps> {
     this.props.setQueries(this.props.exploreId, [query]);
   };
 
-  onClickLabel = (key: string, value: string) => {
+  onCellFilterAdded = (filter: FilterItem) => {
+    const { value, key, operator } = filter;
+    if (operator === FILTER_FOR_OPERATOR) {
+      this.onClickFilterLabel(key, value);
+    }
+
+    if (operator === FILTER_OUT_OPERATOR) {
+      this.onClickFilterOutLabel(key, value);
+    }
+  };
+
+  onClickFilterLabel = (key: string, value: string) => {
     this.onModifyQueries({ type: 'ADD_FILTER', key, value });
+  };
+
+  onClickFilterOutLabel = (key: string, value: string) => {
+    this.onModifyQueries({ type: 'ADD_FILTER_OUT', key, value });
+  };
+
+  onClickAddQueryRowButton = () => {
+    const { exploreId, queryKeys } = this.props;
+    this.props.addQueryRow(exploreId, queryKeys.length);
   };
 
   onModifyQueries = (action: any, index?: number) => {
     const { datasourceInstance } = this.props;
-    if (datasourceInstance && datasourceInstance.modifyQuery) {
-      const modifier = (queries: DataQuery, modification: any) => datasourceInstance.modifyQuery(queries, modification);
-      this.props.modifyQueries(this.props.exploreId, action, index, modifier);
+    if (datasourceInstance?.modifyQuery) {
+      const modifier = (queries: DataQuery, modification: any) =>
+        datasourceInstance.modifyQuery!(queries, modification);
+      this.props.modifyQueries(this.props.exploreId, action, modifier, index);
     }
   };
 
@@ -188,23 +262,43 @@ export class Explore extends React.PureComponent<ExploreProps> {
 
   onStartScanning = () => {
     // Scanner will trigger a query
-    const scanner = this.scanPreviousRange;
-    this.props.scanStart(this.props.exploreId, scanner);
-  };
-
-  scanPreviousRange = (): RawTimeRange => {
-    // Calling move() on the timepicker will trigger this.onChangeTime()
-    return this.timepickerRef.current.move(-1, true);
+    this.props.scanStart(this.props.exploreId);
   };
 
   onStopScanning = () => {
     this.props.scanStopAction({ exploreId: this.props.exploreId });
   };
 
+  onToggleGraph = (showingGraph: boolean) => {
+    const { toggleGraph, exploreId } = this.props;
+    toggleGraph(exploreId, showingGraph);
+  };
+
+  onUpdateTimeRange = (absoluteRange: AbsoluteTimeRange) => {
+    const { exploreId, updateTimeRange } = this.props;
+    updateTimeRange({ exploreId, absoluteRange });
+  };
+
+  toggleShowRichHistory = () => {
+    this.setState(state => {
+      return {
+        openDrawer: state.openDrawer === ExploreDrawer.RichHistory ? undefined : ExploreDrawer.RichHistory,
+      };
+    });
+  };
+
+  toggleShowQueryInspector = () => {
+    this.setState(state => {
+      return {
+        openDrawer: state.openDrawer === ExploreDrawer.QueryInspector ? undefined : ExploreDrawer.QueryInspector,
+      };
+    });
+  };
+
   refreshExplore = () => {
     const { exploreId, update } = this.props;
 
-    if (update.queries || update.ui || update.range || update.datasource) {
+    if (update.queries || update.ui || update.range || update.datasource || update.mode) {
       this.props.refreshExplore(exploreId);
     }
   };
@@ -217,48 +311,62 @@ export class Explore extends React.PureComponent<ExploreProps> {
     );
   };
 
-  onReconnect = (event: React.MouseEvent<HTMLButtonElement>) => {
-    const { exploreId, reconnectDatasource } = this.props;
-
-    event.preventDefault();
-    reconnectDatasource(exploreId);
-  };
-
   render() {
     const {
-      StartPage,
       datasourceInstance,
-      datasourceError,
-      datasourceLoading,
       datasourceMissing,
       exploreId,
-      showingStartPage,
       split,
       queryKeys,
-      queryErrors,
-      mode,
+      graphResult,
+      loading,
+      absoluteRange,
+      showingGraph,
+      showingTable,
+      timeZone,
+      queryResponse,
+      syncedTimes,
+      isLive,
+      theme,
+      showMetrics,
+      showTable,
+      showLogs,
+      showTrace,
     } = this.props;
+    const { openDrawer } = this.state;
     const exploreClass = split ? 'explore explore-split' : 'explore';
+    const styles = getStyles(theme);
+    const StartPage = datasourceInstance?.components?.ExploreStartPage;
+    const showStartPage = !queryResponse || queryResponse.state === LoadingState.NotStarted;
+
+    // gets an error without a refID, so non-query-row-related error, like a connection error
+    const queryErrors = queryResponse.error ? [queryResponse.error] : undefined;
+    const queryError = getFirstNonQueryRowSpecificError(queryErrors);
+
+    const showRichHistory = openDrawer === ExploreDrawer.RichHistory;
+    const showQueryInspector = openDrawer === ExploreDrawer.QueryInspector;
 
     return (
-      <div className={exploreClass} ref={this.getRef}>
-        <ExploreToolbar exploreId={exploreId} timepickerRef={this.timepickerRef} onChangeTime={this.onChangeTime} />
-        {datasourceLoading ? <div className="explore-container">Loading datasource...</div> : null}
+      <div className={exploreClass} ref={this.getRef} aria-label={selectors.pages.Explore.General.container}>
+        <ExploreToolbar exploreId={exploreId} onChangeTime={this.onChangeTime} />
         {datasourceMissing ? this.renderEmptyState() : null}
-
-        <FadeIn duration={datasourceError ? 150 : 5} in={datasourceError ? true : false}>
-          <div className="explore-container">
-            <Alert
-              message={`Error connecting to datasource: ${datasourceError}`}
-              button={{ text: 'Reconnect', onClick: this.onReconnect }}
-            />
-          </div>
-        </FadeIn>
-
         {datasourceInstance && (
           <div className="explore-container">
-            <QueryRows exploreEvents={this.exploreEvents} exploreId={exploreId} queryKeys={queryKeys} />
-            <ErrorContainer queryErrors={queryErrors} />
+            <div className={cx('panel-container', styles.queryContainer)}>
+              <QueryRows exploreEvents={this.exploreEvents} exploreId={exploreId} queryKeys={queryKeys} />
+              <SecondaryActions
+                addQueryRowButtonDisabled={isLive}
+                // We cannot show multiple traces at the same time right now so we do not show add query button.
+                //TODO:unification
+                addQueryRowButtonHidden={false}
+                richHistoryButtonActive={showRichHistory}
+                queryInspectorButtonActive={showQueryInspector}
+                onClickAddQueryRowButton={this.onClickAddQueryRowButton}
+                onClickRichHistoryButton={this.toggleShowRichHistory}
+                onClickQueryInspectorButton={this.toggleShowQueryInspector}
+              />
+            </div>
+            <ErrorContainer queryError={queryError} />
             <AutoSizer onResize={this.onResize} disableHeight>
               {({ width }) => {
                 if (width === 0) {
@@ -266,27 +374,80 @@ export class Explore extends React.PureComponent<ExploreProps> {
                 }
 
                 return (
-                  <main className="m-t-2" style={{ width }}>
-                    <ErrorBoundary>
-                      {showingStartPage && <StartPage onClickExample={this.onClickExample} />}
-                      {!showingStartPage && (
+                  <main className={cx(styles.logsMain)} style={{ width }}>
+                    <ErrorBoundaryAlert>
+                      {showStartPage && StartPage && (
+                        <div className={'grafana-info-box grafana-info-box--max-lg'}>
+                          <StartPage
+                            onClickExample={this.onClickExample}
+                            datasource={datasourceInstance}
+                            exploreId={exploreId}
+                          />
+                        </div>
+                      )}
+                      {!showStartPage && (
                         <>
-                          {mode === ExploreMode.Metrics && <GraphContainer width={width} exploreId={exploreId} />}
-                          {mode === ExploreMode.Metrics && (
-                            <TableContainer exploreId={exploreId} onClickCell={this.onClickLabel} />
+                          {showMetrics && (
+                            <ExploreGraphPanel
+                              series={graphResult}
+                              width={width}
+                              loading={loading}
+                              absoluteRange={absoluteRange}
+                              isStacked={false}
+                              showPanel={true}
+                              showingGraph={showingGraph}
+                              showingTable={showingTable}
+                              timeZone={timeZone}
+                              onToggleGraph={this.onToggleGraph}
+                              onUpdateTimeRange={this.onUpdateTimeRange}
+                              showBars={false}
+                              showLines={true}
+                            />
                           )}
-                          {mode === ExploreMode.Logs && (
+                          {showTable && (
+                            <TableContainer
+                              width={width}
+                              exploreId={exploreId}
+                              onCellFilterAdded={
+                                this.props.datasourceInstance?.modifyQuery ? this.onCellFilterAdded : undefined
+                              }
+                            />
+                          )}
+                          {showLogs && (
                             <LogsContainer
                               width={width}
                               exploreId={exploreId}
-                              onClickLabel={this.onClickLabel}
+                              syncedTimes={syncedTimes}
+                              onClickFilterLabel={this.onClickFilterLabel}
+                              onClickFilterOutLabel={this.onClickFilterOutLabel}
                               onStartScanning={this.onStartScanning}
                               onStopScanning={this.onStopScanning}
                             />
                           )}
+                          {/* TODO:unification */}
+                          {showTrace &&
+                            // We expect only one trace at the moment to be in the dataframe
+                            // If there is not data (like 404) we show a separate error so no need to show anything here
+                            queryResponse.series[0] && (
+                              <TraceView trace={queryResponse.series[0].fields[0].values.get(0) as any} />
+                            )}
                         </>
                       )}
-                    </ErrorBoundary>
+                      {showRichHistory && (
+                        <RichHistoryContainer
+                          width={width}
+                          exploreId={exploreId}
+                          onClose={this.toggleShowRichHistory}
+                        />
+                      )}
+                      {showQueryInspector && (
+                        <ExploreQueryInspector
+                          exploreId={exploreId}
+                          width={width}
+                          onClose={this.toggleShowQueryInspector}
+                        />
+                      )}
+                    </ErrorBoundaryAlert>
                   </main>
                 );
               }}
@@ -298,41 +459,48 @@ export class Explore extends React.PureComponent<ExploreProps> {
   }
 }
 
-function mapStateToProps(state: StoreState, { exploreId }: ExploreProps) {
+const ensureQueriesMemoized = memoizeOne(ensureQueries);
+const getTimeRangeFromUrlMemoized = memoizeOne(getTimeRangeFromUrl);
+
+function mapStateToProps(state: StoreState, { exploreId }: ExploreProps): Partial<ExploreProps> {
   const explore = state.explore;
-  const { split } = explore;
+  const { split, syncedTimes } = explore;
   const item: ExploreItemState = explore[exploreId];
   const timeZone = getTimeZone(state.user);
   const {
-    StartPage,
-    datasourceError,
     datasourceInstance,
-    datasourceLoading,
     datasourceMissing,
     initialized,
-    showingStartPage,
     queryKeys,
     urlState,
     update,
-    queryErrors,
-    mode,
     isLive,
+    graphResult,
+    logsResult,
+    showLogs,
+    showMetrics,
+    showTable,
+    showTrace,
+    loading,
+    showingGraph,
+    showingTable,
+    absoluteRange,
+    queryResponse,
   } = item;
 
-  const { datasource, queries, range: urlRange, ui } = (urlState || {}) as ExploreUrlState;
-  const initialDatasource = datasource || store.get(LAST_USED_DATASOURCE_KEY);
-  const initialQueries: DataQuery[] = ensureQueries(queries);
-  const initialRange = urlRange ? getTimeRangeFromUrl(urlRange, timeZone).raw : DEFAULT_RANGE;
+  const { datasource, queries, range: urlRange, ui, originPanelId } = (urlState || {}) as ExploreUrlState;
+  const initialDatasource = datasource || store.get(lastUsedDatasourceKeyForOrgId(state.user.orgId));
+  const initialQueries: DataQuery[] = ensureQueriesMemoized(queries);
+  const initialRange = urlRange
+    ? getTimeRangeFromUrlMemoized(urlRange, timeZone)
+    : getTimeRange(timeZone, DEFAULT_RANGE);
+
   const initialUI = ui || DEFAULT_UI_STATE;
 
   return {
-    StartPage,
-    datasourceError,
     datasourceInstance,
-    datasourceLoading,
     datasourceMissing,
     initialized,
-    showingStartPage,
     split,
     queryKeys,
     update,
@@ -340,27 +508,39 @@ function mapStateToProps(state: StoreState, { exploreId }: ExploreProps) {
     initialQueries,
     initialRange,
     initialUI,
-    queryErrors,
-    mode,
     isLive,
+    graphResult: graphResult ?? undefined,
+    logsResult: logsResult ?? undefined,
+    loading,
+    showingGraph,
+    showingTable,
+    absoluteRange,
+    queryResponse,
+    originPanelId,
+    syncedTimes,
+    timeZone,
+    showLogs,
+    showMetrics,
+    showTable,
+    showTrace,
   };
 }
 
-const mapDispatchToProps = {
+const mapDispatchToProps: Partial<ExploreProps> = {
   changeSize,
-  changeTime,
   initializeExplore,
   modifyQueries,
-  reconnectDatasource,
   refreshExplore,
   scanStart,
   scanStopAction,
   setQueries,
+  updateTimeRange,
+  toggleGraph,
+  addQueryRow,
 };
 
-export default hot(module)(
-  connect(
-    mapStateToProps,
-    mapDispatchToProps
-  )(Explore)
-) as React.ComponentType<{ exploreId: ExploreId }>;
+export default compose(
+  hot(module),
+  connect(mapStateToProps, mapDispatchToProps),
+  withTheme
+)(Explore) as React.ComponentType<{ exploreId: ExploreId }>;

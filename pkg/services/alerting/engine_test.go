@@ -39,16 +39,16 @@ func (handler *FakeResultHandler) handle(evalContext *EvalContext) error {
 
 func TestEngineProcessJob(t *testing.T) {
 	Convey("Alerting engine job processing", t, func() {
-		engine := &AlertingService{}
-		engine.Init()
+		engine := &AlertEngine{}
+		err := engine.Init()
+		So(err, ShouldBeNil)
 		setting.AlertingEvaluationTimeout = 30 * time.Second
 		setting.AlertingNotificationTimeout = 30 * time.Second
 		setting.AlertingMaxAttempts = 3
 		engine.resultHandler = &FakeResultHandler{}
-		job := &Job{Running: true, Rule: &Rule{}}
+		job := &Job{running: true, Rule: &Rule{}}
 
 		Convey("Should trigger retry if needed", func() {
-
 			Convey("error + not last attempt -> retry", func() {
 				engine.evalHandler = NewFakeEvalHandler(0)
 
@@ -93,13 +93,13 @@ func TestEngineProcessJob(t *testing.T) {
 		})
 
 		Convey("Should trigger as many retries as needed", func() {
-
 			Convey("never success -> max retries number", func() {
 				expectedAttempts := setting.AlertingMaxAttempts
 				evalHandler := NewFakeEvalHandler(0)
 				engine.evalHandler = evalHandler
 
-				engine.processJobWithRetry(context.TODO(), job)
+				err := engine.processJobWithRetry(context.TODO(), job)
+				So(err, ShouldBeNil)
 				So(evalHandler.CallNb, ShouldEqual, expectedAttempts)
 			})
 
@@ -108,7 +108,8 @@ func TestEngineProcessJob(t *testing.T) {
 				evalHandler := NewFakeEvalHandler(1)
 				engine.evalHandler = evalHandler
 
-				engine.processJobWithRetry(context.TODO(), job)
+				err := engine.processJobWithRetry(context.TODO(), job)
+				So(err, ShouldBeNil)
 				So(evalHandler.CallNb, ShouldEqual, expectedAttempts)
 			})
 
@@ -117,7 +118,8 @@ func TestEngineProcessJob(t *testing.T) {
 				evalHandler := NewFakeEvalHandler(expectedAttempts)
 				engine.evalHandler = evalHandler
 
-				engine.processJobWithRetry(context.TODO(), job)
+				err := engine.processJobWithRetry(context.TODO(), job)
+				So(err, ShouldBeNil)
 				So(evalHandler.CallNb, ShouldEqual, expectedAttempts)
 			})
 		})

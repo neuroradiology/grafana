@@ -1,6 +1,12 @@
 import { TimeSrv } from './TimeSrv';
 import { ContextSrvStub } from 'test/specs/helpers';
-import { isDateTime, dateTime } from '@grafana/ui/src/utils/moment_wrapper';
+import { isDateTime, dateTime } from '@grafana/data';
+
+jest.mock('app/core/core', () => ({
+  appEvents: {
+    on: () => {},
+  },
+}));
 
 describe('timeSrv', () => {
   const rootScope = {
@@ -19,7 +25,7 @@ describe('timeSrv', () => {
     search: jest.fn(() => ({})),
   };
 
-  let timeSrv;
+  let timeSrv: TimeSrv;
 
   const _dashboard: any = {
     time: { from: 'now-6h', to: 'now' },
@@ -129,6 +135,38 @@ describe('timeSrv', () => {
       expect(time.to.valueOf()).toEqual(1410337665699);
     });
 
+    it('should handle epochs that look like formatted date without time', () => {
+      location = {
+        search: jest.fn(() => ({
+          from: '20149999',
+          to: '20159999',
+        })),
+      };
+
+      timeSrv = new TimeSrv(rootScope as any, jest.fn() as any, location as any, timer, new ContextSrvStub() as any);
+
+      timeSrv.init(_dashboard);
+      const time = timeSrv.timeRange();
+      expect(time.from.valueOf()).toEqual(20149999);
+      expect(time.to.valueOf()).toEqual(20159999);
+    });
+
+    it('should handle epochs that look like formatted date', () => {
+      location = {
+        search: jest.fn(() => ({
+          from: '201499991234567',
+          to: '201599991234567',
+        })),
+      };
+
+      timeSrv = new TimeSrv(rootScope as any, jest.fn() as any, location as any, timer, new ContextSrvStub() as any);
+
+      timeSrv.init(_dashboard);
+      const time = timeSrv.timeRange();
+      expect(time.from.valueOf()).toEqual(201499991234567);
+      expect(time.to.valueOf()).toEqual(201599991234567);
+    });
+
     it('should handle bad dates', () => {
       location = {
         search: jest.fn(() => ({
@@ -143,6 +181,39 @@ describe('timeSrv', () => {
       timeSrv.init(_dashboard);
       expect(timeSrv.time.from).toEqual('now-6h');
       expect(timeSrv.time.to).toEqual('now');
+    });
+
+    describe('data point windowing', () => {
+      it('handles time window specfied as interval string', () => {
+        location = {
+          search: jest.fn(() => ({
+            time: '1410337645000',
+            'time.window': '10s',
+          })),
+        };
+
+        timeSrv = new TimeSrv(rootScope as any, jest.fn() as any, location as any, timer, new ContextSrvStub() as any);
+
+        timeSrv.init(_dashboard);
+        const time = timeSrv.timeRange();
+        expect(time.from.valueOf()).toEqual(1410337640000);
+        expect(time.to.valueOf()).toEqual(1410337650000);
+      });
+      it('handles time window specified in ms', () => {
+        location = {
+          search: jest.fn(() => ({
+            time: '1410337645000',
+            'time.window': '10000',
+          })),
+        };
+
+        timeSrv = new TimeSrv(rootScope as any, jest.fn() as any, location as any, timer, new ContextSrvStub() as any);
+
+        timeSrv.init(_dashboard);
+        const time = timeSrv.timeRange();
+        expect(time.from.valueOf()).toEqual(1410337640000);
+        expect(time.to.valueOf()).toEqual(1410337650000);
+      });
     });
   });
 

@@ -16,6 +16,7 @@ func init() {
 		Type:        "opsgenie",
 		Name:        "OpsGenie",
 		Description: "Sends notifications to OpsGenie",
+		Heading:     "OpsGenie settings",
 		Factory:     NewOpsGenieNotifier,
 		OptionsTemplate: `
       <h3 class="page-heading">OpsGenie settings</h3>
@@ -36,7 +37,45 @@ func init() {
            tooltip="Automatically close alerts in OpsGenie once the alert goes back to ok.">
         </gf-form-switch>
       </div>
-    `,
+      <div class="gf-form">
+        <gf-form-switch
+           class="gf-form"
+           label="Override priority"
+           label-class="width-14"
+           checked="ctrl.model.settings.overridePriority"
+           tooltip="Allow the alert priority to be set using the og_priority tag">
+        </gf-form-switch>
+  </div>
+`,
+		Options: []alerting.NotifierOption{
+			{
+				Label:        "API Key",
+				Element:      alerting.ElementTypeInput,
+				InputType:    alerting.InputTypeText,
+				Placeholder:  "OpsGenie API Key",
+				PropertyName: "apiKey",
+				Required:     true,
+			},
+			{
+				Label:        "Alert API Url",
+				Element:      alerting.ElementTypeInput,
+				InputType:    alerting.InputTypeText,
+				Placeholder:  "https://api.opsgenie.com/v2/alerts",
+				PropertyName: "apiUrl",
+				Required:     true,
+			},
+			{
+				Label:        "Auto close incidents",
+				Element:      alerting.ElementTypeSwitch,
+				Description:  "Automatically close alerts in OpsGenie once the alert goes back to ok.",
+				PropertyName: "autoClose",
+			}, {
+				Label:        "Override priority",
+				Element:      alerting.ElementTypeSwitch,
+				Description:  "Allow the alert priority to be set using the og_priority tag",
+				PropertyName: "overridePriority",
+			},
+		},
 	})
 }
 
@@ -47,6 +86,7 @@ var (
 // NewOpsGenieNotifier is the constructor for OpsGenie.
 func NewOpsGenieNotifier(model *models.AlertNotification) (alerting.Notifier, error) {
 	autoClose := model.Settings.Get("autoClose").MustBool(true)
+	overridePriority := model.Settings.Get("overridePriority").MustBool(true)
 	apiKey := model.Settings.Get("apiKey").MustString()
 	apiURL := model.Settings.Get("apiUrl").MustString()
 	if apiKey == "" {
@@ -57,11 +97,12 @@ func NewOpsGenieNotifier(model *models.AlertNotification) (alerting.Notifier, er
 	}
 
 	return &OpsGenieNotifier{
-		NotifierBase: NewNotifierBase(model),
-		APIKey:       apiKey,
-		APIUrl:       apiURL,
-		AutoClose:    autoClose,
-		log:          log.New("alerting.notifier.opsgenie"),
+		NotifierBase:     NewNotifierBase(model),
+		APIKey:           apiKey,
+		APIUrl:           apiURL,
+		AutoClose:        autoClose,
+		OverridePriority: overridePriority,
+		log:              log.New("alerting.notifier.opsgenie"),
 	}, nil
 }
 
@@ -69,10 +110,11 @@ func NewOpsGenieNotifier(model *models.AlertNotification) (alerting.Notifier, er
 // alert notifications to OpsGenie
 type OpsGenieNotifier struct {
 	NotifierBase
-	APIKey    string
-	APIUrl    string
-	AutoClose bool
-	log       log.Logger
+	APIKey           string
+	APIUrl           string
+	AutoClose        bool
+	OverridePriority bool
+	log              log.Logger
 }
 
 // Notify sends an alert notification to OpsGenie.
@@ -90,9 +132,9 @@ func (on *OpsGenieNotifier) Notify(evalContext *alerting.EvalContext) error {
 }
 
 func (on *OpsGenieNotifier) createAlert(evalContext *alerting.EvalContext) error {
-	on.log.Info("Creating OpsGenie alert", "ruleId", evalContext.Rule.Id, "notification", on.Name)
+	on.log.Info("Creating OpsGenie alert", "ruleId", evalContext.Rule.ID, "notification", on.Name)
 
-	ruleURL, err := evalContext.GetRuleUrl()
+	ruleURL, err := evalContext.GetRuleURL()
 	if err != nil {
 		on.log.Error("Failed get rule link", "error", err)
 		return err
@@ -100,22 +142,41 @@ func (on *OpsGenieNotifier) createAlert(evalContext *alerting.EvalContext) error
 
 	customData := triggMetrString
 	for _, evt := range evalContext.EvalMatches {
-		customData = customData + fmt.Sprintf("%s: %v\n", evt.Metric, evt.Value)
+		customData += fmt.Sprintf("%s: %v\n", evt.Metric, evt.Value)
 	}
 
 	bodyJSON := simplejson.New()
 	bodyJSON.Set("message", evalContext.Rule.Name)
 	bodyJSON.Set("source", "Grafana")
-	bodyJSON.Set("alias", "alertId-"+strconv.FormatInt(evalContext.Rule.Id, 10))
+	bodyJSON.Set("alias", "alertId-"+strconv.FormatInt(evalContext.Rule.ID, 10))
 	bodyJSON.Set("description", fmt.Sprintf("%s - %s\n%s\n%s", evalContext.Rule.Name, ruleURL, evalContext.Rule.Message, customData))
 
 	details := simplejson.New()
 	details.Set("url", ruleURL)
-	if evalContext.ImagePublicUrl != "" {
-		details.Set("image", evalContext.ImagePublicUrl)
+	if on.NeedsImage() && evalContext.ImagePublicURL != "" {
+		details.Set("image", evalContext.ImagePublicURL)
 	}
 
 	bodyJSON.Set("details", details)
+
+	tags := make([]string, 0)
+	for _, tag := range evalContext.Rule.AlertRuleTags {
+		if len(tag.Value) > 0 {
+			tags = append(tags, fmt.Sprintf("%s:%s", tag.Key, tag.Value))
+		} else {
+			tags = append(tags, tag.Key)
+		}
+		if tag.Key == "og_priority" {
+			if on.OverridePriority {
+				validPriorities := map[string]bool{"P1": true, "P2": true, "P3": true, "P4": true, "P5": true}
+				if validPriorities[tag.Value] {
+					bodyJSON.Set("priority", tag.Value)
+				}
+			}
+		}
+	}
+	bodyJSON.Set("tags", tags)
+
 	body, _ := bodyJSON.MarshalJSON()
 
 	cmd := &models.SendWebhookSync{
@@ -136,14 +197,14 @@ func (on *OpsGenieNotifier) createAlert(evalContext *alerting.EvalContext) error
 }
 
 func (on *OpsGenieNotifier) closeAlert(evalContext *alerting.EvalContext) error {
-	on.log.Info("Closing OpsGenie alert", "ruleId", evalContext.Rule.Id, "notification", on.Name)
+	on.log.Info("Closing OpsGenie alert", "ruleId", evalContext.Rule.ID, "notification", on.Name)
 
 	bodyJSON := simplejson.New()
 	bodyJSON.Set("source", "Grafana")
 	body, _ := bodyJSON.MarshalJSON()
 
 	cmd := &models.SendWebhookSync{
-		Url:        fmt.Sprintf("%s/alertId-%d/close?identifierType=alias", on.APIUrl, evalContext.Rule.Id),
+		Url:        fmt.Sprintf("%s/alertId-%d/close?identifierType=alias", on.APIUrl, evalContext.Rule.ID),
 		Body:       string(body),
 		HttpMethod: "POST",
 		HttpHeader: map[string]string{

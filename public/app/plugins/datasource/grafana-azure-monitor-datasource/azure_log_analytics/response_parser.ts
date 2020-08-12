@@ -1,19 +1,18 @@
 import _ from 'lodash';
-import { dateTime } from '@grafana/ui/src/utils/moment_wrapper';
+import { AnnotationEvent, dateTime, TimeSeries } from '@grafana/data';
 import {
-  AzureLogsVariable,
   AzureLogsTableData,
+  AzureLogsVariable,
+  KustoColumn,
   KustoDatabase,
   KustoFunction,
-  KustoTable,
   KustoSchema,
-  KustoColumn,
+  KustoTable,
 } from '../types';
-import { TimeSeries, AnnotationEvent } from '@grafana/ui/src/types';
 
 export default class ResponseParser {
   columns: string[];
-  constructor(private results) {}
+  constructor(private results: any) {}
 
   parseQueryResult(): any {
     let data: any[] = [];
@@ -35,7 +34,7 @@ export default class ResponseParser {
     return data;
   }
 
-  parseTimeSeriesResult(query, columns, rows): TimeSeries[] {
+  parseTimeSeriesResult(query: { refId: string; query: any }, columns: any[], rows: any): TimeSeries[] {
     const data: TimeSeries[] = [];
     let timeIndex = -1;
     let metricIndex = -1;
@@ -66,14 +65,14 @@ export default class ResponseParser {
       bucket.datapoints.push([row[valueIndex], epoch]);
       bucket.refId = query.refId;
       bucket.meta = {
-        query: query.query,
+        executedQueryString: query.query,
       };
     });
 
     return data;
   }
 
-  parseTableResult(query, columns, rows): AzureLogsTableData {
+  parseTableResult(query: { refId: string; query: string }, columns: any[], rows: any[]): AzureLogsTableData {
     const tableResult: AzureLogsTableData = {
       type: 'table',
       columns: _.map(columns, col => {
@@ -82,7 +81,7 @@ export default class ResponseParser {
       rows: rows,
       refId: query.refId,
       meta: {
-        query: query.query,
+        executedQueryString: query.query,
       },
     };
 
@@ -190,6 +189,9 @@ export default class ResponseParser {
 
   createSchemaFunctions(): { [key: string]: KustoFunction } {
     const functions: { [key: string]: KustoFunction } = {};
+    if (!this.results.functions) {
+      return functions;
+    }
 
     for (const func of this.results.functions) {
       functions[func.name] = {
@@ -206,7 +208,7 @@ export default class ResponseParser {
     return functions;
   }
 
-  static findOrCreateBucket(data, target): TimeSeries {
+  static findOrCreateBucket(data: TimeSeries[], target: any): TimeSeries {
     let dataTarget: any = _.find(data, ['target', target]);
     if (!dataTarget) {
       dataTarget = { target: target, datapoints: [], refId: '', query: '' };
@@ -216,7 +218,7 @@ export default class ResponseParser {
     return dataTarget;
   }
 
-  static dateTimeToEpoch(dateTimeValue) {
+  static dateTimeToEpoch(dateTimeValue: any) {
     return dateTime(dateTimeValue).valueOf();
   }
 }

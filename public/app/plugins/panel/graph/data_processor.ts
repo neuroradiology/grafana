@@ -1,15 +1,25 @@
 import _ from 'lodash';
-import { TimeRange, colors, getColorFromHexRgbOrName, FieldCache, FieldType, Field, SeriesData } from '@grafana/ui';
+import { colors } from '@grafana/ui';
+import {
+  getColorFromHexRgbOrName,
+  TimeRange,
+  FieldType,
+  Field,
+  DataFrame,
+  getTimeField,
+  dateTime,
+  getFieldDisplayName,
+} from '@grafana/data';
 import TimeSeries from 'app/core/time_series2';
 import config from 'app/core/config';
 
 type Options = {
-  dataList: SeriesData[];
+  dataList: DataFrame[];
   range?: TimeRange;
 };
 
 export class DataProcessor {
-  constructor(private panel) {}
+  constructor(private panel: any) {}
 
   getSeriesList(options: Options): TimeSeries[] {
     const list: TimeSeries[] = [];
@@ -19,39 +29,28 @@ export class DataProcessor {
       return list;
     }
 
-    for (const series of dataList) {
-      const { fields } = series;
-      const cache = new FieldCache(fields);
-      const time = cache.getFirstFieldOfType(FieldType.time);
+    for (let i = 0; i < dataList.length; i++) {
+      const series = dataList[i];
+      const { timeField } = getTimeField(series);
 
-      if (!time) {
+      if (!timeField) {
         continue;
       }
 
-      const seriesName = series.name ? series.name : series.refId;
+      for (let j = 0; j < series.fields.length; j++) {
+        const field = series.fields[j];
 
-      for (let i = 0; i < fields.length; i++) {
-        if (fields[i].type !== FieldType.number) {
+        if (field.type !== FieldType.number) {
           continue;
         }
-
-        const field = fields[i];
-        let name = field.title;
-
-        if (!field.title) {
-          name = field.name;
-        }
-
-        if (seriesName && dataList.length > 0 && name !== seriesName) {
-          name = seriesName + ' ' + name;
-        }
-
+        const name = getFieldDisplayName(field, series, dataList);
         const datapoints = [];
-        for (const row of series.rows) {
-          datapoints.push([row[i], row[time.index]]);
+
+        for (let r = 0; r < series.length; r++) {
+          datapoints.push([field.values.get(r), dateTime(timeField.values.get(r)).valueOf()]);
         }
 
-        list.push(this.toTimeSeries(field, name, datapoints, list.length, range));
+        list.push(this.toTimeSeries(field, name, i, j, datapoints, list.length, range));
       }
     }
 
@@ -59,15 +58,26 @@ export class DataProcessor {
     if (this.panel.xaxis.mode === 'histogram' && !this.panel.stack && list.length > 1) {
       const first = list[0];
       first.alias = first.aliasEscaped = 'Count';
+
       for (let i = 1; i < list.length; i++) {
         first.datapoints = first.datapoints.concat(list[i].datapoints);
       }
+
       return [first];
     }
+
     return list;
   }
 
-  private toTimeSeries(field: Field, alias: string, datapoints: any[][], index: number, range?: TimeRange) {
+  private toTimeSeries(
+    field: Field,
+    alias: string,
+    dataFrameIndex: number,
+    fieldIndex: number,
+    datapoints: any[][],
+    index: number,
+    range?: TimeRange
+  ) {
     const colorIndex = index % colors.length;
     const color = this.panel.aliasColors[alias] || colors[colorIndex];
 
@@ -75,7 +85,9 @@ export class DataProcessor {
       datapoints: datapoints || [],
       alias: alias,
       color: getColorFromHexRgbOrName(color, config.theme.type),
-      unit: field.unit,
+      unit: field.config ? field.config.unit : undefined,
+      dataFrameIndex,
+      fieldIndex,
     });
 
     if (datapoints && datapoints.length > 0 && range) {
@@ -140,7 +152,7 @@ export class DataProcessor {
     }
   }
 
-  getXAxisValueOptions(options) {
+  getXAxisValueOptions(options: any) {
     switch (this.panel.xaxis.mode) {
       case 'series': {
         return [

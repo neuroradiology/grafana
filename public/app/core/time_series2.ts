@@ -1,6 +1,6 @@
 import { getFlotTickDecimals } from 'app/core/utils/ticks';
 import _ from 'lodash';
-import { getValueFormat, stringToJsRegex, ValueFormatter, DecimalCount } from '@grafana/ui';
+import { getValueFormat, ValueFormatter, stringToJsRegex, DecimalCount, formattedValueToString } from '@grafana/data';
 
 function matchSeriesOverride(aliasOrRegex: string, seriesAlias: string) {
   if (!aliasOrRegex) {
@@ -17,6 +17,16 @@ function matchSeriesOverride(aliasOrRegex: string, seriesAlias: string) {
 
 function translateFillOption(fill: number) {
   return fill === 0 ? 0.001 : fill / 10;
+}
+
+function getFillGradient(amount: number) {
+  if (!amount) {
+    return null;
+  }
+
+  return {
+    colors: [{ opacity: 0.0 }, { opacity: amount / 10 }],
+  };
 }
 
 /**
@@ -66,25 +76,35 @@ export function getDataMinMax(data: TimeSeries[]) {
   return { datamin, datamax };
 }
 
+/**
+ * @deprecated: This class should not be used in new panels
+ *
+ * Use DataFrame and helpers instead
+ */
 export default class TimeSeries {
   datapoints: any;
   id: string;
+  // Represents index of original data frame in the quey response
+  dataFrameIndex: number;
+  // Represents index of field in the data frame
+  fieldIndex: number;
   label: string;
   alias: string;
   aliasEscaped: string;
-  color: string;
+  color?: string;
   valueFormater: any;
   stats: any;
   legend: boolean;
   hideTooltip: boolean;
   allIsNull: boolean;
   allIsZero: boolean;
-  decimals: number;
-  scaledDecimals: number;
+  decimals: DecimalCount;
+  scaledDecimals: DecimalCount;
   hasMsResolution: boolean;
   isOutsideRange: boolean;
 
   lines: any;
+  hiddenSeries: boolean;
   dashes: any;
   bars: any;
   points: any;
@@ -109,6 +129,8 @@ export default class TimeSeries {
     this.stats = {};
     this.legend = true;
     this.unit = opts.unit;
+    this.dataFrameIndex = opts.dataFrameIndex;
+    this.fieldIndex = opts.fieldIndex;
     this.hasMsResolution = this.isMsResolutionNeeded();
   }
 
@@ -144,6 +166,9 @@ export default class TimeSeries {
       }
       if (override.fill !== void 0) {
         this.lines.fill = translateFillOption(override.fill);
+      }
+      if (override.fillGradient !== void 0) {
+        this.lines.fillColor = getFillGradient(override.fillGradient);
       }
       if (override.stack !== void 0) {
         this.stack = override.stack;
@@ -188,6 +213,9 @@ export default class TimeSeries {
 
       if (override.yaxis !== void 0) {
         this.yaxis = override.yaxis;
+      }
+      if (override.hiddenSeries !== void 0) {
+        this.hiddenSeries = override.hiddenSeries;
       }
     }
   }
@@ -320,16 +348,16 @@ export default class TimeSeries {
     this.scaledDecimals = scaledDecimals;
   }
 
-  formatValue(value: number) {
+  formatValue(value: number | null) {
     if (!_.isFinite(value)) {
       value = null; // Prevent NaN formatting
     }
-    return this.valueFormater(value, this.decimals, this.scaledDecimals);
+    return formattedValueToString(this.valueFormater(value, this.decimals, this.scaledDecimals));
   }
 
   isMsResolutionNeeded() {
     for (let i = 0; i < this.datapoints.length; i++) {
-      if (this.datapoints[i][1] !== null) {
+      if (this.datapoints[i][1] !== null && this.datapoints[i][1] !== undefined) {
         const timestamp = this.datapoints[i][1].toString();
         if (timestamp.length === 13 && timestamp % 1000 !== 0) {
           return true;

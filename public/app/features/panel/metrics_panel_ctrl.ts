@@ -1,30 +1,26 @@
 import _ from 'lodash';
-
-import kbn from 'app/core/utils/kbn';
-
 import { PanelCtrl } from 'app/features/panel/panel_ctrl';
-import { getExploreUrl } from 'app/core/utils/explore';
-import { applyPanelTimeOverrides, getResolution } from 'app/features/dashboard/utils/panel';
+import { applyPanelTimeOverrides } from 'app/features/dashboard/utils/panel';
 import { ContextSrv } from 'app/core/services/context_srv';
 import {
-  toLegacyResponseData,
-  isSeriesData,
-  LegacyResponseData,
-  TimeRange,
-  DataSourceApi,
-  PanelData,
-  LoadingState,
+  DataFrame,
   DataQueryResponse,
-  SeriesData,
-} from '@grafana/ui';
+  DataSourceApi,
+  LegacyResponseData,
+  LoadingState,
+  PanelData,
+  PanelEvents,
+  TimeRange,
+  toDataFrameDTO,
+  toLegacyResponseData,
+} from '@grafana/data';
 import { Unsubscribable } from 'rxjs';
 import { PanelModel } from 'app/features/dashboard/state';
-import { PanelQueryRunnerFormat } from '../dashboard/state/PanelQueryRunner';
+import { PanelQueryRunner } from '../dashboard/state/PanelQueryRunner';
 
 class MetricsPanelCtrl extends PanelCtrl {
   scope: any;
   datasource: DataSourceApi;
-  $q: any;
   $timeout: any;
   contextSrv: ContextSrv;
   datasourceSrv: any;
@@ -37,13 +33,12 @@ class MetricsPanelCtrl extends PanelCtrl {
   timeInfo?: string;
   skipDataOnInit: boolean;
   dataList: LegacyResponseData[];
-  querySubscription?: Unsubscribable;
-  dataFormat = PanelQueryRunnerFormat.legacy;
+  querySubscription?: Unsubscribable | null;
+  useDataFrames = false;
 
   constructor($scope: any, $injector: any) {
     super($scope, $injector);
 
-    this.$q = $injector.get('$q');
     this.contextSrv = $injector.get('contextSrv');
     this.datasourceSrv = $injector.get('datasourceSrv');
     this.timeSrv = $injector.get('timeSrv');
@@ -51,8 +46,16 @@ class MetricsPanelCtrl extends PanelCtrl {
     this.scope = $scope;
     this.panel.datasource = this.panel.datasource || null;
 
-    this.events.on('refresh', this.onMetricsPanelRefresh.bind(this));
-    this.events.on('panel-teardown', this.onPanelTearDown.bind(this));
+    this.events.on(PanelEvents.refresh, this.onMetricsPanelRefresh.bind(this));
+    this.events.on(PanelEvents.panelTeardown, this.onPanelTearDown.bind(this));
+    this.events.on(PanelEvents.componentDidMount, this.onMetricsPanelMounted.bind(this));
+  }
+
+  private onMetricsPanelMounted() {
+    const queryRunner = this.panel.getQueryRunner() as PanelQueryRunner;
+    this.querySubscription = queryRunner
+      .getData({ withTransforms: true, withFieldConfig: true })
+      .subscribe(this.panelDataObserver);
   }
 
   private onPanelTearDown() {
@@ -80,7 +83,7 @@ class MetricsPanelCtrl extends PanelCtrl {
       // Defer panel rendering till the next digest cycle.
       // For some reason snapshot panels don't init at this time, so this helps to avoid rendering issues.
       return this.$timeout(() => {
-        this.events.emit('data-snapshot-load', data);
+        this.events.emit(PanelEvents.dataSnapshotLoad, data);
       });
     }
 
@@ -89,16 +92,13 @@ class MetricsPanelCtrl extends PanelCtrl {
     this.loading = true;
 
     // load datasource service
-    return (
-      this.datasourceSrv
-        .get(this.panel.datasource, this.panel.scopedVars)
-        .then(this.updateTimeRange.bind(this))
-        .then(this.issueQueries.bind(this))
-        // NOTE handleQueryResult is called by panelDataObserver
-        .catch((err: any) => {
-          this.processDataError(err);
-        })
-    );
+    return this.datasourceSrv
+      .get(this.panel.datasource, this.panel.scopedVars)
+      .then(this.updateTimeRange.bind(this))
+      .then(this.issueQueries.bind(this))
+      .catch((err: any) => {
+        this.processDataError(err);
+      });
   }
 
   processDataError(err: any) {
@@ -108,21 +108,23 @@ class MetricsPanelCtrl extends PanelCtrl {
       return;
     }
 
-    this.loading = false;
     this.error = err.message || 'Request Error';
-    this.inspector = { error: err };
 
     if (err.data) {
       if (err.data.message) {
         this.error = err.data.message;
-      }
-      if (err.data.error) {
+      } else if (err.data.error) {
         this.error = err.data.error;
       }
     }
 
-    this.events.emit('data-error', err);
-    console.log('Panel data error:', err);
+    this.angularDirtyCheck();
+  }
+
+  angularDirtyCheck() {
+    if (!this.$scope.$root.$$phase) {
+      this.$scope.$digest();
+    }
   }
 
   // Updates the response with information from the stream
@@ -131,70 +133,47 @@ class MetricsPanelCtrl extends PanelCtrl {
       if (data.state === LoadingState.Error) {
         this.loading = false;
         this.processDataError(data.error);
+      }
+
+      // Ignore data in loading state
+      if (data.state === LoadingState.Loading) {
+        this.loading = true;
+        this.angularDirtyCheck();
         return;
       }
 
-      this.loading = false;
-
       if (data.request) {
-        const { range, timeInfo } = data.request;
-        if (range) {
-          this.range = range;
-        }
+        const { timeInfo } = data.request;
         if (timeInfo) {
           this.timeInfo = timeInfo;
         }
       }
 
-      if (this.dataFormat === PanelQueryRunnerFormat.legacy) {
-        // The result should already be processed, but just in case
-        if (!data.legacy) {
-          data.legacy = data.series.map(v => {
-            if (isSeriesData(v)) {
-              return toLegacyResponseData(v);
-            }
-            return v;
-          });
-        }
-
-        // Make the results look like they came directly from a <6.2 datasource request
-        // NOTE: any object other than 'data' is no longer supported supported
-        this.handleQueryResult({
-          data: data.legacy,
-        });
-      } else {
-        this.handleSeriesData(data.series);
+      if (data.timeRange) {
+        this.range = data.timeRange;
       }
+
+      if (this.useDataFrames) {
+        this.handleDataFrames(data.series);
+      } else {
+        // Make the results look as if they came directly from a <6.2 datasource request
+        const legacy = data.series.map(v => toLegacyResponseData(v));
+        this.handleQueryResult({ data: legacy });
+      }
+
+      this.angularDirtyCheck();
     },
   };
 
   updateTimeRange(datasource?: DataSourceApi) {
     this.datasource = datasource || this.datasource;
     this.range = this.timeSrv.timeRange();
-    this.resolution = getResolution(this.panel);
 
     const newTimeData = applyPanelTimeOverrides(this.panel, this.range);
     this.timeInfo = newTimeData.timeInfo;
     this.range = newTimeData.timeRange;
 
-    this.calculateInterval();
-
     return this.datasource;
-  }
-
-  calculateInterval() {
-    let intervalOverride = this.panel.interval;
-
-    // if no panel interval check datasource
-    if (intervalOverride) {
-      intervalOverride = this.templateSrv.replace(intervalOverride, this.panel.scopedVars);
-    } else if (this.datasource && this.datasource.interval) {
-      intervalOverride = this.datasource.interval;
-    }
-
-    const res = kbn.calculateInterval(this.range, this.resolution, intervalOverride);
-    this.interval = res.interval;
-    this.intervalMs = res.intervalMs;
   }
 
   issueQueries(datasource: DataSourceApi) {
@@ -203,33 +182,34 @@ class MetricsPanelCtrl extends PanelCtrl {
     const panel = this.panel as PanelModel;
     const queryRunner = panel.getQueryRunner();
 
-    if (!this.querySubscription) {
-      this.querySubscription = queryRunner.subscribe(this.panelDataObserver, this.dataFormat);
-    }
-
     return queryRunner.run({
       datasource: panel.datasource,
       queries: panel.targets,
       panelId: panel.id,
       dashboardId: this.dashboard.id,
-      timezone: this.dashboard.timezone,
+      timezone: this.dashboard.getTimezone(),
+      timeInfo: this.timeInfo,
       timeRange: this.range,
-      widthPixels: this.resolution, // The pixel width
-      maxDataPoints: panel.maxDataPoints,
+      maxDataPoints: panel.maxDataPoints || this.width,
       minInterval: panel.interval,
       scopedVars: panel.scopedVars,
       cacheTimeout: panel.cacheTimeout,
+      transformations: panel.transformations,
     });
   }
 
-  handleSeriesData(data: SeriesData[]) {
+  handleDataFrames(data: DataFrame[]) {
     this.loading = false;
 
     if (this.dashboard && this.dashboard.snapshot) {
-      this.panel.snapshotData = data;
+      this.panel.snapshotData = data.map(frame => toDataFrameDTO(frame));
     }
 
-    // Subclasses that asked for SeriesData will override
+    try {
+      this.events.emit(PanelEvents.dataFramesReceived, data);
+    } catch (err) {
+      this.processDataError(err);
+    }
   }
 
   handleQueryResult(result: DataQueryResponse) {
@@ -244,26 +224,10 @@ class MetricsPanelCtrl extends PanelCtrl {
       result = { data: [] };
     }
 
-    this.events.emit('data-received', result.data);
-  }
-
-  getAdditionalMenuItems() {
-    const items = [];
-    if (this.contextSrv.hasAccessToExplore() && this.datasource) {
-      items.push({
-        text: 'Explore',
-        click: 'ctrl.explore();',
-        icon: 'gicon gicon-explore',
-        shortcut: 'x',
-      });
-    }
-    return items;
-  }
-
-  async explore() {
-    const url = await getExploreUrl(this.panel, this.panel.targets, this.datasource, this.datasourceSrv, this.timeSrv);
-    if (url) {
-      this.$timeout(() => this.$location.url(url));
+    try {
+      this.events.emit(PanelEvents.dataReceived, result.data);
+    } catch (err) {
+      this.processDataError(err);
     }
   }
 }

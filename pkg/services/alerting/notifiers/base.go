@@ -18,7 +18,7 @@ type NotifierBase struct {
 	Name                  string
 	Type                  string
 	UID                   string
-	IsDeault              bool
+	IsDefault             bool
 	UploadImage           bool
 	SendReminder          bool
 	DisableResolveMessage bool
@@ -38,7 +38,7 @@ func NewNotifierBase(model *models.AlertNotification) NotifierBase {
 	return NotifierBase{
 		UID:                   model.Uid,
 		Name:                  model.Name,
-		IsDeault:              model.IsDefault,
+		IsDefault:             model.IsDefault,
 		Type:                  model.Type,
 		UploadImage:           uploadImage,
 		SendReminder:          model.SendReminder,
@@ -49,7 +49,7 @@ func NewNotifierBase(model *models.AlertNotification) NotifierBase {
 }
 
 // ShouldNotify checks this evaluation should send an alert notification
-func (n *NotifierBase) ShouldNotify(ctx context.Context, context *alerting.EvalContext, notiferState *models.AlertNotificationState) bool {
+func (n *NotifierBase) ShouldNotify(ctx context.Context, context *alerting.EvalContext, notifierState *models.AlertNotificationState) bool {
 	prevState := context.PrevAlertState
 	newState := context.Rule.State
 
@@ -60,8 +60,8 @@ func (n *NotifierBase) ShouldNotify(ctx context.Context, context *alerting.EvalC
 
 	if prevState == newState && n.SendReminder {
 		// Do not notify if interval has not elapsed
-		lastNotify := time.Unix(notiferState.UpdatedAt, 0)
-		if notiferState.UpdatedAt != 0 && lastNotify.Add(n.Frequency).After(time.Now()) {
+		lastNotify := time.Unix(notifierState.UpdatedAt, 0)
+		if notifierState.UpdatedAt != 0 && lastNotify.Add(n.Frequency).After(time.Now()) {
 			return false
 		}
 
@@ -71,11 +71,10 @@ func (n *NotifierBase) ShouldNotify(ctx context.Context, context *alerting.EvalC
 		}
 	}
 
-	unknownOrNoData := prevState == models.AlertStateUnknown || prevState == models.AlertStateNoData
 	okOrPending := newState == models.AlertStatePending || newState == models.AlertStateOK
 
-	// Do not notify when new state is ok/pending when previous is unknown or no_data
-	if unknownOrNoData && okOrPending {
+	// Do not notify when new state is ok/pending when previous is unknown
+	if prevState == models.AlertStateUnknown && okOrPending {
 		return false
 	}
 
@@ -95,8 +94,8 @@ func (n *NotifierBase) ShouldNotify(ctx context.Context, context *alerting.EvalC
 	}
 
 	// Do not notify if state pending and it have been updated last minute
-	if notiferState.State == models.AlertNotificationStatePending {
-		lastUpdated := time.Unix(notiferState.UpdatedAt, 0)
+	if notifierState.State == models.AlertNotificationStatePending {
+		lastUpdated := time.Unix(notifierState.UpdatedAt, 0)
 		if lastUpdated.Add(1 * time.Minute).After(time.Now()) {
 			return false
 		}
@@ -120,15 +119,15 @@ func (n *NotifierBase) NeedsImage() bool {
 	return n.UploadImage
 }
 
-// GetNotifierUid returns the notifier `uid`.
-func (n *NotifierBase) GetNotifierUid() string {
+// GetNotifierUID returns the notifier `uid`.
+func (n *NotifierBase) GetNotifierUID() string {
 	return n.UID
 }
 
 // GetIsDefault returns true if the notifiers should
 // be used for all alerts.
 func (n *NotifierBase) GetIsDefault() bool {
-	return n.IsDeault
+	return n.IsDefault
 }
 
 // GetSendReminder returns true if reminders should be sent.
@@ -142,7 +141,7 @@ func (n *NotifierBase) GetDisableResolveMessage() bool {
 	return n.DisableResolveMessage
 }
 
-// GetFrequency returns the freqency for how often
+// GetFrequency returns the frequency for how often
 // alerts should be evaluated.
 func (n *NotifierBase) GetFrequency() time.Duration {
 	return n.Frequency

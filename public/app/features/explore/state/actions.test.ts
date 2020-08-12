@@ -1,32 +1,47 @@
-import { refreshExplore, testDatasource, loadDatasource } from './actions';
-import { ExploreId, ExploreUrlState, ExploreUpdateState } from 'app/types';
+import { PayloadAction } from '@reduxjs/toolkit';
+import { DataQuery, DefaultTimeZone, LogsDedupStrategy, toUtc, ExploreUrlState } from '@grafana/data';
+
+import { cancelQueries, loadDatasource, navigateToExplore, refreshExplore } from './actions';
+import { ExploreId, ExploreUpdateState } from 'app/types';
 import { thunkTester } from 'test/core/thunk/thunkTester';
 import {
+  cancelQueriesAction,
   initializeExploreAction,
   InitializeExplorePayload,
-  changeTimeAction,
-  updateUIStateAction,
-  setQueriesAction,
-  testDataSourcePendingAction,
-  testDataSourceSuccessAction,
-  testDataSourceFailureAction,
   loadDatasourcePendingAction,
   loadDatasourceReadyAction,
+  scanStopAction,
+  setQueriesAction,
+  updateUIStateAction,
 } from './actionTypes';
 import { Emitter } from 'app/core/core';
-import { ActionOf } from 'app/core/redux/actionCreatorFactory';
 import { makeInitialUpdateState } from './reducers';
-import { DataQuery } from '@grafana/ui/src/types/datasource';
-import { DefaultTimeZone, RawTimeRange, LogsDedupStrategy } from '@grafana/ui';
-import { toUtc } from '@grafana/ui/src/utils/moment_wrapper';
+import { PanelModel } from 'app/features/dashboard/state';
+import { updateLocation } from '../../../core/actions';
+import { MockDataSourceApi } from '../../../../test/mocks/datasource_srv';
+import * as DatasourceSrv from 'app/features/plugins/datasource_srv';
+import { interval } from 'rxjs';
 
-jest.mock('app/features/plugins/datasource_srv', () => ({
-  getDatasourceSrv: () => ({
-    getExternal: jest.fn().mockReturnValue([]),
-    get: jest.fn().mockReturnValue({
-      testDatasource: jest.fn(),
-      init: jest.fn(),
-    }),
+jest.mock('app/features/plugins/datasource_srv');
+const getDatasourceSrvMock = (DatasourceSrv.getDatasourceSrv as any) as jest.Mock<DatasourceSrv.DatasourceSrv>;
+
+beforeEach(() => {
+  getDatasourceSrvMock.mockClear();
+  getDatasourceSrvMock.mockImplementation(
+    () =>
+      ({
+        getExternal: jest.fn().mockReturnValue([]),
+        get: jest.fn().mockReturnValue({
+          testDatasource: jest.fn(),
+          init: jest.fn(),
+        }),
+      } as any)
+  );
+});
+
+jest.mock('../../dashboard/services/TimeSrv', () => ({
+  getTimeSrv: jest.fn().mockReturnValue({
+    init: jest.fn(),
   }),
 }));
 
@@ -40,8 +55,8 @@ const testRange = {
   },
 };
 jest.mock('app/core/utils/explore', () => ({
-  ...jest.requireActual('app/core/utils/explore'),
-  getTimeRangeFromUrl: (range: RawTimeRange) => testRange,
+  ...((jest.requireActual('app/core/utils/explore') as unknown) as object),
+  getTimeRangeFromUrl: (range: any) => testRange,
 }));
 
 const setup = (updateOverides?: Partial<ExploreUpdateState>) => {
@@ -61,6 +76,7 @@ const setup = (updateOverides?: Partial<ExploreUpdateState>) => {
   const update = { ...updateDefaults, ...updateOverides };
   const initialState = {
     user: {
+      orgId: '1',
       timeZone,
     },
     explore: {
@@ -102,7 +118,7 @@ describe('refreshExplore', () => {
           .givenThunk(refreshExplore)
           .whenThunkIsDispatched(exploreId);
 
-        const initializeExplore = dispatchedActions[2] as ActionOf<InitializeExplorePayload>;
+        const initializeExplore = dispatchedActions[1] as PayloadAction<InitializeExplorePayload>;
         const { type, payload } = initializeExplore;
 
         expect(type).toEqual(initializeExploreAction.type);
@@ -114,19 +130,6 @@ describe('refreshExplore', () => {
         expect(payload.range.raw.from).toEqual(testRange.raw.from);
         expect(payload.range.raw.to).toEqual(testRange.raw.to);
         expect(payload.ui).toEqual(ui);
-      });
-    });
-
-    describe('and update range is set', () => {
-      it('then it should dispatch changeTimeAction', async () => {
-        const { exploreId, range, initialState } = setup({ range: true });
-
-        const dispatchedActions = await thunkTester(initialState)
-          .givenThunk(refreshExplore)
-          .whenThunkIsDispatched(exploreId);
-
-        expect(dispatchedActions[0].type).toEqual(changeTimeAction.type);
-        expect(dispatchedActions[0].payload).toEqual({ exploreId, range });
       });
     });
 
@@ -171,69 +174,37 @@ describe('refreshExplore', () => {
   });
 });
 
-describe('test datasource', () => {
-  describe('when testDatasource thunk is dispatched', () => {
-    describe('and testDatasource call on instance is successful', () => {
-      it('then it should dispatch testDataSourceSuccessAction', async () => {
-        const exploreId = ExploreId.left;
-        const mockDatasourceInstance = {
-          testDatasource: () => {
-            return Promise.resolve({ status: 'success' });
-          },
-        };
+describe('running queries', () => {
+  it('should cancel running query when cancelQueries is dispatched', async () => {
+    const unsubscribable = interval(1000);
+    unsubscribable.subscribe();
+    const exploreId = ExploreId.left;
+    const initialState = {
+      explore: {
+        [exploreId]: {
+          datasourceInstance: 'test-datasource',
+          initialized: true,
+          loading: true,
+          querySubscription: unsubscribable,
+          queries: ['A'],
+          range: testRange,
+        },
+      },
 
-        const dispatchedActions = await thunkTester({})
-          .givenThunk(testDatasource)
-          .whenThunkIsDispatched(exploreId, mockDatasourceInstance);
+      user: {
+        orgId: 'A',
+      },
+    };
 
-        expect(dispatchedActions).toEqual([
-          testDataSourcePendingAction({ exploreId }),
-          testDataSourceSuccessAction({ exploreId }),
-        ]);
-      });
-    });
+    const dispatchedActions = await thunkTester(initialState)
+      .givenThunk(cancelQueries)
+      .whenThunkIsDispatched(exploreId);
 
-    describe('and testDatasource call on instance is not successful', () => {
-      it('then it should dispatch testDataSourceFailureAction', async () => {
-        const exploreId = ExploreId.left;
-        const error = 'something went wrong';
-        const mockDatasourceInstance = {
-          testDatasource: () => {
-            return Promise.resolve({ status: 'fail', message: error });
-          },
-        };
-
-        const dispatchedActions = await thunkTester({})
-          .givenThunk(testDatasource)
-          .whenThunkIsDispatched(exploreId, mockDatasourceInstance);
-
-        expect(dispatchedActions).toEqual([
-          testDataSourcePendingAction({ exploreId }),
-          testDataSourceFailureAction({ exploreId, error }),
-        ]);
-      });
-    });
-
-    describe('and testDatasource call on instance throws', () => {
-      it('then it should dispatch testDataSourceFailureAction', async () => {
-        const exploreId = ExploreId.left;
-        const error = 'something went wrong';
-        const mockDatasourceInstance = {
-          testDatasource: () => {
-            throw { statusText: error };
-          },
-        };
-
-        const dispatchedActions = await thunkTester({})
-          .givenThunk(testDatasource)
-          .whenThunkIsDispatched(exploreId, mockDatasourceInstance);
-
-        expect(dispatchedActions).toEqual([
-          testDataSourcePendingAction({ exploreId }),
-          testDataSourceFailureAction({ exploreId, error }),
-        ]);
-      });
-    });
+    expect(dispatchedActions).toEqual([
+      scanStopAction({ exploreId }),
+      cancelQueriesAction({ exploreId }),
+      expect.anything(),
+    ]);
   });
 });
 
@@ -262,8 +233,6 @@ describe('loading datasource', () => {
             exploreId,
             requestedDatasourceName: mockDatasourceInstance.name,
           }),
-          testDataSourcePendingAction({ exploreId }),
-          testDataSourceSuccessAction({ exploreId }),
           loadDatasourceReadyAction({ exploreId, history: [] }),
         ]);
       });
@@ -292,9 +261,133 @@ describe('loading datasource', () => {
             exploreId,
             requestedDatasourceName: mockDatasourceInstance.name,
           }),
-          testDataSourcePendingAction({ exploreId }),
-          testDataSourceSuccessAction({ exploreId }),
         ]);
+      });
+    });
+  });
+});
+
+const getNavigateToExploreContext = async (openInNewWindow?: (url: string) => void) => {
+  const url = 'http://www.someurl.com';
+  const panel: Partial<PanelModel> = {
+    datasource: 'mocked datasource',
+    targets: [{ refId: 'A' }],
+  };
+  const datasource = new MockDataSourceApi(panel.datasource!);
+  const get = jest.fn().mockResolvedValue(datasource);
+  const getDataSourceSrv = jest.fn().mockReturnValue({ get });
+  const getTimeSrv = jest.fn();
+  const getExploreUrl = jest.fn().mockResolvedValue(url);
+
+  const dispatchedActions = await thunkTester({})
+    .givenThunk(navigateToExplore)
+    .whenThunkIsDispatched(panel, { getDataSourceSrv, getTimeSrv, getExploreUrl, openInNewWindow });
+
+  return {
+    url,
+    panel,
+    datasource,
+    get,
+    getDataSourceSrv,
+    getTimeSrv,
+    getExploreUrl,
+    dispatchedActions,
+  };
+};
+
+describe('navigateToExplore', () => {
+  describe('when navigateToExplore thunk is dispatched', () => {
+    describe('and openInNewWindow is undefined', () => {
+      const openInNewWindow: (url: string) => void = (undefined as unknown) as (url: string) => void;
+      it('then it should dispatch correct actions', async () => {
+        const { dispatchedActions, url } = await getNavigateToExploreContext(openInNewWindow);
+
+        expect(dispatchedActions).toEqual([updateLocation({ path: url, query: {} })]);
+      });
+
+      it('then getDataSourceSrv should have been once', async () => {
+        const { getDataSourceSrv } = await getNavigateToExploreContext(openInNewWindow);
+
+        expect(getDataSourceSrv).toHaveBeenCalledTimes(1);
+      });
+
+      it('then getDataSourceSrv.get should have been called with correct arguments', async () => {
+        const { get, panel } = await getNavigateToExploreContext(openInNewWindow);
+
+        expect(get).toHaveBeenCalledTimes(1);
+        expect(get).toHaveBeenCalledWith(panel.datasource);
+      });
+
+      it('then getTimeSrv should have been called once', async () => {
+        const { getTimeSrv } = await getNavigateToExploreContext(openInNewWindow);
+
+        expect(getTimeSrv).toHaveBeenCalledTimes(1);
+      });
+
+      it('then getExploreUrl should have been called with correct arguments', async () => {
+        const { getExploreUrl, panel, datasource, getDataSourceSrv, getTimeSrv } = await getNavigateToExploreContext(
+          openInNewWindow
+        );
+
+        expect(getExploreUrl).toHaveBeenCalledTimes(1);
+        expect(getExploreUrl).toHaveBeenCalledWith({
+          panel,
+          panelTargets: panel.targets,
+          panelDatasource: datasource,
+          datasourceSrv: getDataSourceSrv(),
+          timeSrv: getTimeSrv(),
+        });
+      });
+    });
+
+    describe('and openInNewWindow is defined', () => {
+      const openInNewWindow: (url: string) => void = jest.fn();
+      it('then it should dispatch no actions', async () => {
+        const { dispatchedActions } = await getNavigateToExploreContext(openInNewWindow);
+
+        expect(dispatchedActions).toEqual([]);
+      });
+
+      it('then getDataSourceSrv should have been once', async () => {
+        const { getDataSourceSrv } = await getNavigateToExploreContext(openInNewWindow);
+
+        expect(getDataSourceSrv).toHaveBeenCalledTimes(1);
+      });
+
+      it('then getDataSourceSrv.get should have been called with correct arguments', async () => {
+        const { get, panel } = await getNavigateToExploreContext(openInNewWindow);
+
+        expect(get).toHaveBeenCalledTimes(1);
+        expect(get).toHaveBeenCalledWith(panel.datasource);
+      });
+
+      it('then getTimeSrv should have been called once', async () => {
+        const { getTimeSrv } = await getNavigateToExploreContext(openInNewWindow);
+
+        expect(getTimeSrv).toHaveBeenCalledTimes(1);
+      });
+
+      it('then getExploreUrl should have been called with correct arguments', async () => {
+        const { getExploreUrl, panel, datasource, getDataSourceSrv, getTimeSrv } = await getNavigateToExploreContext(
+          openInNewWindow
+        );
+
+        expect(getExploreUrl).toHaveBeenCalledTimes(1);
+        expect(getExploreUrl).toHaveBeenCalledWith({
+          panel,
+          panelTargets: panel.targets,
+          panelDatasource: datasource,
+          datasourceSrv: getDataSourceSrv(),
+          timeSrv: getTimeSrv(),
+        });
+      });
+
+      it('then openInNewWindow should have been called with correct arguments', async () => {
+        const openInNewWindowFunc = jest.fn();
+        const { url } = await getNavigateToExploreContext(openInNewWindowFunc);
+
+        expect(openInNewWindowFunc).toHaveBeenCalledTimes(1);
+        expect(openInNewWindowFunc).toHaveBeenCalledWith(url);
       });
     });
   });

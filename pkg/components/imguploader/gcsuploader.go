@@ -35,23 +35,39 @@ func NewGCSUploader(keyFile, bucket, path string) *GCSUploader {
 }
 
 func (u *GCSUploader) Upload(ctx context.Context, imageDiskPath string) (string, error) {
-	fileName := util.GetRandomString(20) + ".png"
+	fileName, err := util.GetRandomString(20)
+	if err != nil {
+		return "", err
+	}
+
+	fileName += pngExt
 	key := path.Join(u.path, fileName)
 
-	u.log.Debug("Opening key file ", u.keyFile)
-	data, err := ioutil.ReadFile(u.keyFile)
-	if err != nil {
-		return "", err
+	var client *http.Client
+
+	if u.keyFile != "" {
+		u.log.Debug("Opening key file ", u.keyFile)
+		data, err := ioutil.ReadFile(u.keyFile)
+		if err != nil {
+			return "", err
+		}
+
+		u.log.Debug("Creating JWT conf")
+		conf, err := google.JWTConfigFromJSON(data, tokenUrl)
+		if err != nil {
+			return "", err
+		}
+
+		u.log.Debug("Creating HTTP client")
+		client = conf.Client(ctx)
+	} else {
+		u.log.Debug("Key file is empty, trying to use application default credentials")
+		client, err = google.DefaultClient(ctx)
+		if err != nil {
+			return "", err
+		}
 	}
 
-	u.log.Debug("Creating JWT conf")
-	conf, err := google.JWTConfigFromJSON(data, tokenUrl)
-	if err != nil {
-		return "", err
-	}
-
-	u.log.Debug("Creating HTTP client")
-	client := conf.Client(ctx)
 	err = u.uploadFile(client, imageDiskPath, key)
 	if err != nil {
 		return "", err
@@ -84,6 +100,7 @@ func (u *GCSUploader) uploadFile(client *http.Client, imageDiskPath, key string)
 	if err != nil {
 		return err
 	}
+	resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("GCS response status code %d", resp.StatusCode)

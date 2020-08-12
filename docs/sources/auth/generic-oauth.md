@@ -12,8 +12,13 @@ weight = 3
 
 # Generic OAuth Authentication
 
-You can configure many different oauth2 authentication services with Grafana using the generic oauth2 feature. Below you
-can find examples using Okta, BitBucket, OneLogin and Azure.
+You can configure many different OAuth2 authentication services with Grafana using the generic OAuth2 feature. Examples:
+- [Auth0](#set-up-oauth2-with-auth0)
+- [Azure AD]({{< relref "azuread.md" >}})
+- [BitBucket](#set-up-oauth2-with-bitbucket) 
+- [Centrify](#set-up-oauth2-with-centrify)
+- [Okta]({{< relref "okta.md" >}}) 
+- [OneLogin](#set-up-oauth2-with-onelogin)
 
 This callback URL must match the full HTTP address that you use in your browser to access Grafana, but with the prefix path of `/login/generic_oauth`.
 
@@ -40,78 +45,28 @@ Set `api_url` to the resource that returns [OpenID UserInfo](https://connect2id.
 Grafana will attempt to determine the user's e-mail address by querying the OAuth provider as described below in the following order until an e-mail address is found:
 
 1. Check for the presence of an e-mail address via the `email` field encoded in the OAuth `id_token` parameter.
-2. Check for the presence of an e-mail address in the `attributes` map encoded in the OAuth `id_token` parameter. By default Grafana will perform a lookup into the attributes map using the `email:primary` key, however, this is configurable and can be adjusted by using the `email_attribute_name` configuration option.
-3. Query the `/emails` endpoint of the OAuth provider's API (configured with `api_url`) and check for the presence of an e-mail address marked as a primary address.
-4. If no e-mail address is found in steps (1-3), then the e-mail address of the user is set to the empty string.
+2. Check for the presence of an e-mail address using the [JMESPath](http://jmespath.org/examples.html) specified via the `email_attribute_path` configuration option. The JSON used for the path lookup is the HTTP response obtained from querying the UserInfo endpoint specified via the `api_url` configuration option.
+**Note**: Only available in Grafana v6.4+.
+3. Check for the presence of an e-mail address in the `attributes` map encoded in the OAuth `id_token` parameter. By default Grafana will perform a lookup into the attributes map using the `email:primary` key, however, this is configurable and can be adjusted by using the `email_attribute_name` configuration option.
+4. Query the `/emails` endpoint of the OAuth provider's API (configured with `api_url`) and check for the presence of an e-mail address marked as a primary address.
+5. If no e-mail address is found in steps (1-4), then the e-mail address of the user is set to the empty string.
 
-## Set up OAuth2 with Okta
+Grafana will also attempt to do role mapping through OAuth as described below.
 
-First set up Grafana as an OpenId client "webapplication" in Okta. Then set the Base URIs to `https://<grafana domain>/` and set the Login redirect URIs to `https://<grafana domain>/login/generic_oauth`.
+> Only available in Grafana v6.5+.
 
-Finally set up the generic oauth module like this:
-```bash
-[auth.generic_oauth]
-name = Okta
-enabled = true
-scopes = openid profile email
-client_id = <okta application Client ID>
-client_secret = <okta application Client Secret>
-auth_url = https://<okta domain>/oauth2/v1/authorize
-token_url = https://<okta domain>/oauth2/v1/token
-api_url = https://<okta domain>/oauth2/v1/userinfo
-```
+Check for the presence of a role using the [JMESPath](http://jmespath.org/examples.html) specified via the `role_attribute_path` configuration option. The JSON used for the path lookup is the HTTP response obtained from querying the UserInfo endpoint specified via the `api_url` configuration option. The result after evaluating the `role_attribute_path` JMESPath expression needs to be a valid Grafana role, i.e. `Viewer`, `Editor` or `Admin`.
 
-## Set up OAuth2 with Bitbucket
+See [JMESPath examples](#jmespath-examples) for more information.
 
-```bash
-[auth.generic_oauth]
-name = BitBucket
-enabled = true
-allow_sign_up = true
-client_id = <client id>
-client_secret = <client secret>
-scopes = account email
-auth_url = https://bitbucket.org/site/oauth2/authorize
-token_url = https://bitbucket.org/site/oauth2/access_token
-api_url = https://api.bitbucket.org/2.0/user
-team_ids =
-allowed_organizations =
-```
+> Only available in Grafana v7.2+.
 
-## Set up OAuth2 with OneLogin
+Customize user login using `login_attribute_path` configuration option. Order of operations is as follows:
 
-1.  Create a new Custom Connector with the following settings:
-    - Name: Grafana
-    - Sign On Method: OpenID Connect
-    - Redirect URI: `https://<grafana domain>/login/generic_oauth`
-    - Signing Algorithm: RS256
-    - Login URL: `https://<grafana domain>/login/generic_oauth`
+1. Grafana evaluates the `login_attribute_path` JMESPath expression against the ID token. 
+1. If Grafana finds no value, then Grafana evaluates expression against the JSON data obtained from UserInfo endpoint. The UserInfo endpoint URL is specified in the `api_url` configuration option.
 
-    then:
-2.  Add an App to the Grafana Connector:
-    - Display Name: Grafana
-
-    then:
-3.  Under the SSO tab on the Grafana App details page you'll find the Client ID and Client Secret.
-
-    Your OneLogin Domain will match the url you use to access OneLogin.
-
-    Configure Grafana as follows:
-
-    ```bash
-    [auth.generic_oauth]
-    name = OneLogin
-    enabled = true
-    allow_sign_up = true
-    client_id = <client id>
-    client_secret = <client secret>
-    scopes = openid email name
-    auth_url = https://<onelogin domain>.onelogin.com/oidc/auth
-    token_url = https://<onelogin domain>.onelogin.com/oidc/token
-    api_url = https://<onelogin domain>.onelogin.com/oidc/me
-    team_ids =
-    allowed_organizations =
-    ```
+You can customize the attribute name used to extract the ID token from the returned OAuth token with the `id_token_attribute_name` option.
 
 ## Set up OAuth2 with Auth0
 
@@ -139,45 +94,22 @@ allowed_organizations =
     api_url = https://<domain>/userinfo
     ```
 
-## Set up OAuth2 with Azure Active Directory
+## Set up OAuth2 with Bitbucket
 
-1.  Log in to portal.azure.com and click "Azure Active Directory" in the side menu, then click the "Properties" sub-menu item.
-
-2.  Copy the "Directory ID", this is needed for setting URLs later
-
-3.  Click "App Registrations" and add a new application registration:
-    - Name: Grafana
-    - Application type: Web app / API
-    - Sign-on URL: `https://<grafana domain>/login/generic_oauth`
-
-4.  Click the name of the new application to open the application details page.
-
-5.  Note down the "Application ID", this will be the OAuth client id.
-
-6.  Click "Settings", then click "Keys" and add a new entry under Passwords
-    - Key Description: Grafana OAuth
-    - Duration: Never Expires
-
-7.  Click Save then copy the key value, this will be the OAuth client secret.
-
-8.  Configure Grafana as follows:
-
-    ```bash
-    [auth.generic_oauth]
-    name = Azure AD
-    enabled = true
-    allow_sign_up = true
-    client_id = <application id>
-    client_secret = <key value>
-    scopes = openid email name
-    auth_url = https://login.microsoftonline.com/<directory id>/oauth2/authorize
-    token_url = https://login.microsoftonline.com/<directory id>/oauth2/token
-    api_url =
-    team_ids =
-    allowed_organizations =
-    ```
-
-> Note: It's important to ensure that the [root_url](/installation/configuration/#root-url) in Grafana is set in your Azure Application Reply URLs (App -> Settings -> Reply URLs)
+```bash
+[auth.generic_oauth]
+name = BitBucket
+enabled = true
+allow_sign_up = true
+client_id = <client id>
+client_secret = <client secret>
+scopes = account email
+auth_url = https://bitbucket.org/site/oauth2/authorize
+token_url = https://bitbucket.org/site/oauth2/access_token
+api_url = https://api.bitbucket.org/2.0/user
+team_ids =
+allowed_organizations =
+```
 
 ## Set up OAuth2 with Centrify
 
@@ -203,25 +135,93 @@ allowed_organizations =
     enabled = true
     allow_sign_up = true
     client_id = <OpenID Connect Client ID from Centrify>
-    client_secret = <your generated OpenID Connect Client Sercret"
-    scopes = openid email name
+    client_secret = <your generated OpenID Connect Client Secret"
+    scopes = openid profile email
     auth_url = https://<your domain>.my.centrify.com/OAuth2/Authorize/<Application ID>
     token_url = https://<your domain>.my.centrify.com/OAuth2/Token/<Application ID>
+    api_url = https://<your domain>.my.centrify.com/OAuth2/UserInfo/<Application ID>
     ```
 
-## Set up OAuth2 with non-compliant providers
+## Set up OAuth2 with OneLogin
 
-> Only available in Grafana v6.0 and above.
+1.  Create a new Custom Connector with the following settings:
+    - Name: Grafana
+    - Sign On Method: OpenID Connect
+    - Redirect URI: `https://<grafana domain>/login/generic_oauth`
+    - Signing Algorithm: RS256
+    - Login URL: `https://<grafana domain>/login/generic_oauth`
 
-Some OAuth2 providers might not support `client_id` and `client_secret` passed via Basic Authentication HTTP header, which
-results in `invalid_client` error. To allow Grafana to authenticate via these type of providers, the client identifiers must be
-send via POST body, which can be enabled via the following settings:
+    then:
+2.  Add an App to the Grafana Connector:
+    - Display Name: Grafana
 
-```bash
-[auth.generic_oauth]
-send_client_credentials_via_post = true
+    then:
+3.  Under the SSO tab on the Grafana App details page you'll find the Client ID and Client Secret.
+
+    Your OneLogin Domain will match the URL you use to access OneLogin.
+
+    Configure Grafana as follows:
+
+    ```bash
+    [auth.generic_oauth]
+    name = OneLogin
+    enabled = true
+    allow_sign_up = true
+    client_id = <client id>
+    client_secret = <client secret>
+    scopes = openid email name
+    auth_url = https://<onelogin domain>.onelogin.com/oidc/2/auth
+    token_url = https://<onelogin domain>.onelogin.com/oidc/2/token
+    api_url = https://<onelogin domain>.onelogin.com/oidc/2/me
+    team_ids =
+    allowed_organizations =
+    ```
+
+## JMESPath examples
+
+To ease configuration of a proper JMESPath expression, you can test/evaluate expressions with custom payloads at http://jmespath.org/.
+
+### Role mapping
+
+**Basic example:**
+
+In the following example user will get `Editor` as role when authenticating. The value of the property `role` will be the resulting role if the role is a proper Grafana role, i.e. `Viewer`, `Editor` or `Admin`.
+
+Payload:
+```json
+{
+    ...
+    "role": "Editor",
+    ...
+}
 ```
 
-<hr>
+Config:
+```bash
+role_attribute_path = role
+```
 
+**Advanced example:**
 
+In the following example user will get `Admin` as role when authenticating since it has a group `admin`. If a user has a group `editor` it will get `Editor` as role, otherwise `Viewer`.
+
+Payload:
+```json
+{
+    ...
+    "info": {
+        ...
+        "groups": [
+            "engineer",
+            "admin",
+        ],
+        ...
+    },
+    ...
+}
+```
+
+Config:
+```bash
+role_attribute_path = contains(info.groups[*], 'admin') && 'Admin' || contains(info.groups[*], 'editor') && 'Editor' || 'Viewer'
+```

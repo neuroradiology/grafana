@@ -6,7 +6,7 @@ import { DashboardModel } from '../state';
 interface ScenarioContext {
   props: Props;
   wrapper?: ShallowWrapper<Props, any, DashboardGrid>;
-  setup?: (fn: () => void) => void;
+  setup: (fn: () => void) => void;
   setProps: (props: Partial<Props>) => void;
 }
 
@@ -48,7 +48,7 @@ function getTestDashboard(overrides?: any, metaOverrides?: any): DashboardModel 
   return new DashboardModel(data, meta);
 }
 
-function dashboardGridScenario(description, scenarioFn: (ctx: ScenarioContext) => void) {
+function dashboardGridScenario(description: string, scenarioFn: (ctx: ScenarioContext) => void) {
   describe(description, () => {
     let setupFn: () => void;
 
@@ -57,9 +57,9 @@ function dashboardGridScenario(description, scenarioFn: (ctx: ScenarioContext) =
         setupFn = fn;
       },
       props: {
-        isEditing: false,
-        isFullscreen: false,
-        scrollTop: null,
+        editPanel: null,
+        viewPanel: null,
+        scrollTop: 0,
         dashboard: getTestDashboard(),
       },
       setProps: (props: Partial<Props>) => {

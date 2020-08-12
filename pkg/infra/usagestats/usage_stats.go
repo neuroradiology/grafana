@@ -28,12 +28,13 @@ func (uss *UsageStatsService) sendUsageStats(oauthProviders map[string]bool) {
 
 	metrics := map[string]interface{}{}
 	report := map[string]interface{}{
-		"version":   version,
-		"metrics":   metrics,
-		"os":        runtime.GOOS,
-		"arch":      runtime.GOARCH,
-		"edition":   getEdition(),
-		"packaging": setting.Packaging,
+		"version":         version,
+		"metrics":         metrics,
+		"os":              runtime.GOOS,
+		"arch":            runtime.GOARCH,
+		"edition":         getEdition(),
+		"hasValidLicense": uss.License.HasValidLicense(),
+		"packaging":       setting.Packaging,
 	}
 
 	statsQuery := models.GetSystemStatsQuery{}
@@ -60,11 +61,16 @@ func (uss *UsageStatsService) sendUsageStats(oauthProviders map[string]bool) {
 	metrics["stats.snapshots.count"] = statsQuery.Result.Snapshots
 	metrics["stats.teams.count"] = statsQuery.Result.Teams
 	metrics["stats.total_auth_token.count"] = statsQuery.Result.AuthTokens
+	metrics["stats.dashboard_versions.count"] = statsQuery.Result.DashboardVersions
+	metrics["stats.annotations.count"] = statsQuery.Result.Annotations
+	metrics["stats.valid_license.count"] = getValidLicenseCount(uss.License.HasValidLicense())
+	metrics["stats.edition.oss.count"] = getOssEditionCount()
+	metrics["stats.edition.enterprise.count"] = getEnterpriseEditionCount()
 
 	userCount := statsQuery.Result.Users
 	avgAuthTokensPerUser := statsQuery.Result.AuthTokens
 	if userCount != 0 {
-		avgAuthTokensPerUser = avgAuthTokensPerUser / userCount
+		avgAuthTokensPerUser /= userCount
 	}
 
 	metrics["stats.avg_auth_token_per_user.count"] = avgAuthTokensPerUser
@@ -90,6 +96,29 @@ func (uss *UsageStatsService) sendUsageStats(oauthProviders map[string]bool) {
 
 	metrics["stats.packaging."+setting.Packaging+".count"] = 1
 
+	// Alerting stats
+	alertingUsageStats, err := uss.AlertingUsageStats.QueryUsageStats()
+	if err != nil {
+		uss.log.Error("Failed to get alerting usage stats", "error", err)
+		return
+	}
+
+	var addAlertingUsageStats = func(dsType string, usageCount int) {
+		metrics[fmt.Sprintf("stats.alerting.ds.%s.count", dsType)] = usageCount
+	}
+
+	alertingOtherCount := 0
+	for dsType, usageCount := range alertingUsageStats.DatasourceUsage {
+		if models.IsKnownDataSourcePlugin(dsType) {
+			addAlertingUsageStats(dsType, usageCount)
+		} else {
+			alertingOtherCount += usageCount
+		}
+	}
+
+	addAlertingUsageStats("other", alertingOtherCount)
+
+	// fetch datasource access stats
 	dsAccessStats := models.GetDataSourceAccessStatsQuery{}
 	if err := uss.Bus.Dispatch(&dsAccessStats); err != nil {
 		metricsLogger.Error("Failed to get datasource access stats", "error", err)
@@ -119,6 +148,7 @@ func (uss *UsageStatsService) sendUsageStats(oauthProviders map[string]bool) {
 		metrics["stats.ds_access.other."+access+".count"] = count
 	}
 
+	// get stats about alert notifier usage
 	anStats := models.GetAlertNotifierUsageStatsQuery{}
 	if err := uss.Bus.Dispatch(&anStats); err != nil {
 		metricsLogger.Error("Failed to get alert notification stats", "error", err)
@@ -129,6 +159,7 @@ func (uss *UsageStatsService) sendUsageStats(oauthProviders map[string]bool) {
 		metrics["stats.alert_notifiers."+stats.Type+".count"] = stats.Count
 	}
 
+	// Add stats about auth configuration
 	authTypes := map[string]bool{}
 	authTypes["anonymous"] = setting.AnonymousEnabled
 	authTypes["basic_auth"] = setting.BasicAuthEnabled
@@ -151,26 +182,78 @@ func (uss *UsageStatsService) sendUsageStats(oauthProviders map[string]bool) {
 	data := bytes.NewBuffer(out)
 
 	client := http.Client{Timeout: 5 * time.Second}
-	go client.Post(usageStatsURL, "application/json", data)
+	go func() {
+		resp, err := client.Post(usageStatsURL, "application/json", data)
+		if err != nil {
+			metricsLogger.Error("Failed to send usage stats", "err", err)
+			return
+		}
+		resp.Body.Close()
+	}()
 }
 
 func (uss *UsageStatsService) updateTotalStats() {
+	if !uss.Cfg.MetricsEndpointEnabled || uss.Cfg.MetricsEndpointDisableTotalStats {
+		return
+	}
+
 	statsQuery := models.GetSystemStatsQuery{}
 	if err := uss.Bus.Dispatch(&statsQuery); err != nil {
 		metricsLogger.Error("Failed to get system stats", "error", err)
 		return
 	}
 
-	metrics.M_StatTotal_Dashboards.Set(float64(statsQuery.Result.Dashboards))
-	metrics.M_StatTotal_Users.Set(float64(statsQuery.Result.Users))
-	metrics.M_StatActive_Users.Set(float64(statsQuery.Result.ActiveUsers))
-	metrics.M_StatTotal_Playlists.Set(float64(statsQuery.Result.Playlists))
-	metrics.M_StatTotal_Orgs.Set(float64(statsQuery.Result.Orgs))
+	metrics.MStatTotalDashboards.Set(float64(statsQuery.Result.Dashboards))
+	metrics.MStatTotalUsers.Set(float64(statsQuery.Result.Users))
+	metrics.MStatActiveUsers.Set(float64(statsQuery.Result.ActiveUsers))
+	metrics.MStatTotalPlaylists.Set(float64(statsQuery.Result.Playlists))
+	metrics.MStatTotalOrgs.Set(float64(statsQuery.Result.Orgs))
+	metrics.StatsTotalViewers.Set(float64(statsQuery.Result.Viewers))
+	metrics.StatsTotalActiveViewers.Set(float64(statsQuery.Result.ActiveViewers))
+	metrics.StatsTotalEditors.Set(float64(statsQuery.Result.Editors))
+	metrics.StatsTotalActiveEditors.Set(float64(statsQuery.Result.ActiveEditors))
+	metrics.StatsTotalAdmins.Set(float64(statsQuery.Result.Admins))
+	metrics.StatsTotalActiveAdmins.Set(float64(statsQuery.Result.ActiveAdmins))
+	metrics.StatsTotalDashboardVersions.Set(float64(statsQuery.Result.DashboardVersions))
+	metrics.StatsTotalAnnotations.Set(float64(statsQuery.Result.Annotations))
+
+	dsStats := models.GetDataSourceStatsQuery{}
+	if err := uss.Bus.Dispatch(&dsStats); err != nil {
+		metricsLogger.Error("Failed to get datasource stats", "error", err)
+		return
+	}
+
+	for _, dsStat := range dsStats.Result {
+		metrics.StatsTotalDataSources.WithLabelValues(dsStat.Type).Set(float64(dsStat.Count))
+	}
 }
 
 func getEdition() string {
+	edition := "oss"
 	if setting.IsEnterprise {
-		return "enterprise"
+		edition = "enterprise"
 	}
-	return "oss"
+
+	return edition
+}
+
+func getEnterpriseEditionCount() int {
+	if setting.IsEnterprise {
+		return 1
+	}
+	return 0
+}
+
+func getOssEditionCount() int {
+	if setting.IsEnterprise {
+		return 0
+	}
+	return 1
+}
+
+func getValidLicenseCount(validLicense bool) int {
+	if validLicense {
+		return 1
+	}
+	return 0
 }

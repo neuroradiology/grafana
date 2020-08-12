@@ -1,7 +1,7 @@
 ///<amd-dependency path="test/specs/helpers" name="helpers" />
 
 import { IndexPattern } from '../index_pattern';
-import { toUtc } from '@grafana/ui/src/utils/moment_wrapper';
+import { toUtc } from '@grafana/data';
 
 describe('IndexPattern', () => {
   describe('when getting index for today', () => {
@@ -16,7 +16,7 @@ describe('IndexPattern', () => {
   describe('when getting index list for time range', () => {
     describe('no interval', () => {
       test('should return correct index', () => {
-        const pattern = new IndexPattern('my-metrics', null);
+        const pattern = new IndexPattern('my-metrics');
         const from = new Date(2015, 4, 30, 1, 2, 3);
         const to = new Date(2015, 5, 1, 12, 5, 6);
         expect(pattern.getIndexList(from, to)).toEqual('my-metrics');

@@ -2,13 +2,13 @@ package ldap
 
 import (
 	"fmt"
+	"io/ioutil"
 	"sync"
 
 	"github.com/BurntSushi/toml"
-	"golang.org/x/xerrors"
 
 	"github.com/grafana/grafana/pkg/infra/log"
-	m "github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/models"
 	"github.com/grafana/grafana/pkg/setting"
 	"github.com/grafana/grafana/pkg/util/errutil"
 )
@@ -42,6 +42,7 @@ type ServerConfig struct {
 	Groups []*GroupToOrgRole `toml:"group_mappings"`
 }
 
+// AttributeMap is a struct representation for LDAP "attributes" setting
 type AttributeMap struct {
 	Username string `toml:"username"`
 	Name     string `toml:"name"`
@@ -50,14 +51,19 @@ type AttributeMap struct {
 	MemberOf string `toml:"member_of"`
 }
 
+// GroupToOrgRole is a struct representation of LDAP
+// config "group_mappings" setting
 type GroupToOrgRole struct {
-	GroupDN        string     `toml:"group_dn"`
-	OrgId          int64      `toml:"org_id"`
-	IsGrafanaAdmin *bool      `toml:"grafana_admin"` // This is a pointer to know if it was set or not (for backwards compatibility)
-	OrgRole        m.RoleType `toml:"org_role"`
+	GroupDN string `toml:"group_dn"`
+	OrgId   int64  `toml:"org_id"`
+
+	// This pointer specifies if setting was set (for backwards compatibility)
+	IsGrafanaAdmin *bool `toml:"grafana_admin"`
+
+	OrgRole models.RoleType `toml:"org_role"`
 }
 
-var config *Config
+// logger for all LDAP stuff
 var logger = log.New("ldap")
 
 // loadingMutex locks the reading of the config so multiple requests for reloading are sequential.
@@ -81,6 +87,10 @@ func ReloadConfig() error {
 	config, err = readConfig(setting.LDAPConfigFile)
 	return err
 }
+
+// We need to define in this space so `GetConfig` fn
+// could be defined as singleton
+var config *Config
 
 // GetConfig returns the LDAP config if LDAP is enabled otherwise it returns nil. It returns either cached value of
 // the config or it reads it and caches it first.
@@ -108,13 +118,24 @@ func readConfig(configFile string) (*Config, error) {
 
 	logger.Info("LDAP enabled, reading config file", "file", configFile)
 
-	_, err := toml.DecodeFile(configFile, result)
+	fileBytes, err := ioutil.ReadFile(configFile)
+	if err != nil {
+		return nil, errutil.Wrap("Failed to load LDAP config file", err)
+	}
+
+	// interpolate full toml string (it can contain ENV variables)
+	stringContent, err := setting.ExpandVar(string(fileBytes))
+	if err != nil {
+		return nil, errutil.Wrap("Failed to expand variables", err)
+	}
+
+	_, err = toml.Decode(stringContent, result)
 	if err != nil {
 		return nil, errutil.Wrap("Failed to load LDAP config file", err)
 	}
 
 	if len(result.Servers) == 0 {
-		return nil, xerrors.New("LDAP enabled but no LDAP servers defined in config file")
+		return nil, fmt.Errorf("LDAP enabled but no LDAP servers defined in config file")
 	}
 
 	// set default org id
@@ -142,11 +163,11 @@ func assertNotEmptyCfg(val interface{}, propName string) error {
 	switch v := val.(type) {
 	case string:
 		if v == "" {
-			return xerrors.Errorf("LDAP config file is missing option: %v", propName)
+			return fmt.Errorf("LDAP config file is missing option: %q", propName)
 		}
 	case []string:
 		if len(v) == 0 {
-			return xerrors.Errorf("LDAP config file is missing option: %v", propName)
+			return fmt.Errorf("LDAP config file is missing option: %q", propName)
 		}
 	default:
 		fmt.Println("unknown")

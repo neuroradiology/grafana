@@ -8,12 +8,11 @@
   "defaultMatchFormat": "pipe",
   "annotations": true,
   "alerting": true,
-  "tables": false,
 
   "info": {
     "description": "Open source time series database",
     "author": {
-      "name": "Grafana Project",
+      "name": "Grafana Labs",
       "url": "https://grafana.com"
     },
     "logos": {

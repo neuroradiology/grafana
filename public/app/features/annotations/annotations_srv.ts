@@ -1,30 +1,28 @@
 // Libaries
-import angular from 'angular';
-import _ from 'lodash';
-
+import flattenDeep from 'lodash/flattenDeep';
+import cloneDeep from 'lodash/cloneDeep';
 // Components
 import './editor_ctrl';
 import coreModule from 'app/core/core_module';
-
 // Utils & Services
-import { makeRegions, dedupAnnotations } from './events_processing';
-
+import { dedupAnnotations } from './events_processing';
 // Types
-import { DashboardModel } from '../dashboard/state/DashboardModel';
+import { DashboardModel, PanelModel } from '../dashboard/state';
+import { AnnotationEvent, AppEvents, DataSourceApi, PanelEvents, TimeRange } from '@grafana/data';
+import { getBackendSrv, getDataSourceSrv } from '@grafana/runtime';
+import { appEvents } from 'app/core/core';
+import { getTimeSrv } from '../dashboard/services/TimeSrv';
 
 export class AnnotationsSrv {
   globalAnnotationsPromise: any;
   alertStatesPromise: any;
   datasourcePromises: any;
 
-  /** @ngInject */
-  constructor(private $rootScope, private $q, private datasourceSrv, private backendSrv, private timeSrv) {}
-
   init(dashboard: DashboardModel) {
     // always clearPromiseCaches when loading new dashboard
     this.clearPromiseCaches();
     // clear promises on refresh events
-    dashboard.on('refresh', this.clearPromiseCaches.bind(this));
+    dashboard.on(PanelEvents.refresh, this.clearPromiseCaches.bind(this));
   }
 
   clearPromiseCaches() {
@@ -33,27 +31,27 @@ export class AnnotationsSrv {
     this.datasourcePromises = null;
   }
 
-  getAnnotations(options) {
-    return this.$q
-      .all([this.getGlobalAnnotations(options), this.getAlertStates(options)])
+  getAnnotations(options: { dashboard: DashboardModel; panel: PanelModel; range: TimeRange }) {
+    return Promise.all([this.getGlobalAnnotations(options), this.getAlertStates(options)])
       .then(results => {
         // combine the annotations and flatten results
-        let annotations: any[] = _.flattenDeep(results[0]);
+        let annotations: AnnotationEvent[] = flattenDeep(results[0]);
+        // when in edit mode we need to use this function to get the saved id
+        let panelFilterId = options.panel.getSavedId();
 
         // filter out annotations that do not belong to requesting panel
-        annotations = _.filter(annotations, item => {
+        annotations = annotations.filter(item => {
           // if event has panel id and query is of type dashboard then panel and requesting panel id must match
           if (item.panelId && item.source.type === 'dashboard') {
-            return item.panelId === options.panel.id;
+            return item.panelId === panelFilterId;
           }
           return true;
         });
 
         annotations = dedupAnnotations(annotations);
-        annotations = makeRegions(annotations, options);
 
         // look for alert state for this panel
-        const alertState: any = _.find(results[1], { panelId: options.panel.id });
+        const alertState: any = results[1].find((res: any) => res.panelId === panelFilterId);
 
         return {
           annotations: annotations,
@@ -61,47 +59,57 @@ export class AnnotationsSrv {
         };
       })
       .catch(err => {
+        if (err.cancelled) {
+          return [];
+        }
+
         if (!err.message && err.data && err.data.message) {
           err.message = err.data.message;
         }
-        console.log('AnnotationSrv.query error', err);
-        this.$rootScope.appEvent('alert-error', ['Annotation Query Failed', err.message || err]);
+
+        console.error('AnnotationSrv.query error', err);
+        appEvents.emit(AppEvents.alertError, ['Annotation Query Failed', err.message || err]);
         return [];
       });
   }
 
-  getAlertStates(options) {
+  getAlertStates(options: any) {
     if (!options.dashboard.id) {
-      return this.$q.when([]);
+      return Promise.resolve([]);
     }
 
     // ignore if no alerts
     if (options.panel && !options.panel.alert) {
-      return this.$q.when([]);
+      return Promise.resolve([]);
     }
 
     if (options.range.raw.to !== 'now') {
-      return this.$q.when([]);
+      return Promise.resolve([]);
     }
 
     if (this.alertStatesPromise) {
       return this.alertStatesPromise;
     }
 
-    this.alertStatesPromise = this.backendSrv.get('/api/alerts/states-for-dashboard', {
-      dashboardId: options.dashboard.id,
-    });
+    this.alertStatesPromise = getBackendSrv().get(
+      '/api/alerts/states-for-dashboard',
+      {
+        dashboardId: options.dashboard.id,
+      },
+      `get-alert-states-${options.dashboard.id}`
+    );
+
     return this.alertStatesPromise;
   }
 
-  getGlobalAnnotations(options) {
+  getGlobalAnnotations(options: { dashboard: DashboardModel; panel: PanelModel; range: TimeRange }) {
     const dashboard = options.dashboard;
 
     if (this.globalAnnotationsPromise) {
       return this.globalAnnotationsPromise;
     }
 
-    const range = this.timeSrv.timeRange();
+    const range = getTimeSrv().timeRange();
     const promises = [];
     const dsPromises = [];
 
@@ -113,14 +121,17 @@ export class AnnotationsSrv {
       if (annotation.snapshotData) {
         return this.translateQueryResult(annotation, annotation.snapshotData);
       }
-      const datasourcePromise = this.datasourceSrv.get(annotation.datasource);
+      const datasourcePromise = getDataSourceSrv().get(annotation.datasource);
       dsPromises.push(datasourcePromise);
       promises.push(
         datasourcePromise
-          .then(datasource => {
-            // issue query against data source
+          .then((datasource: DataSourceApi) => {
+            if (!datasource.annotationQuery) {
+              return [];
+            }
+
             return datasource.annotationQuery({
-              range: range,
+              range,
               rangeRaw: range.raw,
               annotation: annotation,
               dashboard: dashboard,
@@ -129,49 +140,48 @@ export class AnnotationsSrv {
           .then(results => {
             // store response in annotation object if this is a snapshot call
             if (dashboard.snapshot) {
-              annotation.snapshotData = angular.copy(results);
+              annotation.snapshotData = cloneDeep(results);
             }
             // translate result
             return this.translateQueryResult(annotation, results);
           })
       );
     }
-    this.datasourcePromises = this.$q.all(dsPromises);
-    this.globalAnnotationsPromise = this.$q.all(promises);
+    this.datasourcePromises = Promise.all(dsPromises);
+    this.globalAnnotationsPromise = Promise.all(promises);
     return this.globalAnnotationsPromise;
   }
 
-  saveAnnotationEvent(annotation) {
+  saveAnnotationEvent(annotation: AnnotationEvent) {
     this.globalAnnotationsPromise = null;
-    return this.backendSrv.post('/api/annotations', annotation);
+    return getBackendSrv().post('/api/annotations', annotation);
   }
 
-  updateAnnotationEvent(annotation) {
+  updateAnnotationEvent(annotation: AnnotationEvent) {
     this.globalAnnotationsPromise = null;
-    return this.backendSrv.put(`/api/annotations/${annotation.id}`, annotation);
+    return getBackendSrv().put(`/api/annotations/${annotation.id}`, annotation);
   }
 
-  deleteAnnotationEvent(annotation) {
+  deleteAnnotationEvent(annotation: AnnotationEvent) {
     this.globalAnnotationsPromise = null;
-    let deleteUrl = `/api/annotations/${annotation.id}`;
-    if (annotation.isRegion) {
-      deleteUrl = `/api/annotations/region/${annotation.regionId}`;
-    }
+    const deleteUrl = `/api/annotations/${annotation.id}`;
 
-    return this.backendSrv.delete(deleteUrl);
+    return getBackendSrv().delete(deleteUrl);
   }
 
-  translateQueryResult(annotation, results) {
+  translateQueryResult(annotation: any, results: any) {
     // if annotation has snapshotData
     // make clone and remove it
     if (annotation.snapshotData) {
-      annotation = angular.copy(annotation);
+      annotation = cloneDeep(annotation);
       delete annotation.snapshotData;
     }
 
     for (const item of results) {
       item.source = annotation;
+      item.isRegion = item.timeEnd && item.time !== item.timeEnd;
     }
+
     return results;
   }
 }

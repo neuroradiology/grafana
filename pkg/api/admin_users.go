@@ -8,33 +8,35 @@ import (
 	"github.com/grafana/grafana/pkg/util"
 )
 
-func AdminCreateUser(c *models.ReqContext, form dtos.AdminCreateUserForm) {
+func AdminCreateUser(c *models.ReqContext, form dtos.AdminCreateUserForm) Response {
 	cmd := models.CreateUserCommand{
 		Login:    form.Login,
 		Email:    form.Email,
 		Password: form.Password,
 		Name:     form.Name,
+		OrgId:    form.OrgId,
 	}
 
 	if len(cmd.Login) == 0 {
 		cmd.Login = cmd.Email
 		if len(cmd.Login) == 0 {
-			c.JsonApiErr(400, "Validation error, need specify either username or email", nil)
-			return
+			return Error(400, "Validation error, need specify either username or email", nil)
 		}
 	}
 
 	if len(cmd.Password) < 4 {
-		c.JsonApiErr(400, "Password is missing or too short", nil)
-		return
+		return Error(400, "Password is missing or too short", nil)
 	}
 
 	if err := bus.Dispatch(&cmd); err != nil {
-		c.JsonApiErr(500, "failed to create user", err)
-		return
+		if err == models.ErrOrgNotFound {
+			return Error(400, models.ErrOrgNotFound.Error(), nil)
+		}
+
+		return Error(500, "failed to create user", err)
 	}
 
-	metrics.M_Api_Admin_User_Create.Inc()
+	metrics.MApiAdminUserCreate.Inc()
 
 	user := cmd.Result
 
@@ -43,25 +45,26 @@ func AdminCreateUser(c *models.ReqContext, form dtos.AdminCreateUserForm) {
 		Id:      user.Id,
 	}
 
-	c.JSON(200, result)
+	return JSON(200, result)
 }
 
-func AdminUpdateUserPassword(c *models.ReqContext, form dtos.AdminUpdateUserPasswordForm) {
+func AdminUpdateUserPassword(c *models.ReqContext, form dtos.AdminUpdateUserPasswordForm) Response {
 	userID := c.ParamsInt64(":id")
 
 	if len(form.Password) < 4 {
-		c.JsonApiErr(400, "New password too short", nil)
-		return
+		return Error(400, "New password too short", nil)
 	}
 
 	userQuery := models.GetUserByIdQuery{Id: userID}
 
 	if err := bus.Dispatch(&userQuery); err != nil {
-		c.JsonApiErr(500, "Could not read user from database", err)
-		return
+		return Error(500, "Could not read user from database", err)
 	}
 
-	passwordHashed := util.EncodePassword(form.Password, userQuery.Result.Salt)
+	passwordHashed, err := util.EncodePassword(form.Password, userQuery.Result.Salt)
+	if err != nil {
+		return Error(500, "Could not encode password", err)
+	}
 
 	cmd := models.ChangeUserPasswordCommand{
 		UserId:      userID,
@@ -69,15 +72,14 @@ func AdminUpdateUserPassword(c *models.ReqContext, form dtos.AdminUpdateUserPass
 	}
 
 	if err := bus.Dispatch(&cmd); err != nil {
-		c.JsonApiErr(500, "Failed to update user password", err)
-		return
+		return Error(500, "Failed to update user password", err)
 	}
 
-	c.JsonOK("User password updated")
+	return Success("User password updated")
 }
 
 // PUT /api/admin/users/:id/permissions
-func AdminUpdateUserPermissions(c *models.ReqContext, form dtos.AdminUpdateUserPermissionsForm) {
+func AdminUpdateUserPermissions(c *models.ReqContext, form dtos.AdminUpdateUserPermissionsForm) Response {
 	userID := c.ParamsInt64(":id")
 
 	cmd := models.UpdateUserPermissionsCommand{
@@ -87,28 +89,28 @@ func AdminUpdateUserPermissions(c *models.ReqContext, form dtos.AdminUpdateUserP
 
 	if err := bus.Dispatch(&cmd); err != nil {
 		if err == models.ErrLastGrafanaAdmin {
-			c.JsonApiErr(400, models.ErrLastGrafanaAdmin.Error(), nil)
-			return
+			return Error(400, models.ErrLastGrafanaAdmin.Error(), nil)
 		}
 
-		c.JsonApiErr(500, "Failed to update user permissions", err)
-		return
+		return Error(500, "Failed to update user permissions", err)
 	}
 
-	c.JsonOK("User permissions updated")
+	return Success("User permissions updated")
 }
 
-func AdminDeleteUser(c *models.ReqContext) {
+func AdminDeleteUser(c *models.ReqContext) Response {
 	userID := c.ParamsInt64(":id")
 
 	cmd := models.DeleteUserCommand{UserId: userID}
 
 	if err := bus.Dispatch(&cmd); err != nil {
-		c.JsonApiErr(500, "Failed to delete user", err)
-		return
+		if err == models.ErrUserNotFound {
+			return Error(404, models.ErrUserNotFound.Error(), nil)
+		}
+		return Error(500, "Failed to delete user", err)
 	}
 
-	c.JsonOK("User deleted")
+	return Success("User deleted")
 }
 
 // POST /api/admin/users/:id/disable
@@ -123,6 +125,9 @@ func (server *HTTPServer) AdminDisableUser(c *models.ReqContext) Response {
 
 	disableCmd := models.DisableUserCommand{UserId: userID, IsDisabled: true}
 	if err := bus.Dispatch(&disableCmd); err != nil {
+		if err == models.ErrUserNotFound {
+			return Error(404, models.ErrUserNotFound.Error(), nil)
+		}
 		return Error(500, "Failed to disable user", err)
 	}
 
@@ -146,6 +151,9 @@ func AdminEnableUser(c *models.ReqContext) Response {
 
 	disableCmd := models.DisableUserCommand{UserId: userID, IsDisabled: false}
 	if err := bus.Dispatch(&disableCmd); err != nil {
+		if err == models.ErrUserNotFound {
+			return Error(404, models.ErrUserNotFound.Error(), nil)
+		}
 		return Error(500, "Failed to enable user", err)
 	}
 

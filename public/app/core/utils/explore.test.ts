@@ -1,21 +1,24 @@
 import {
-  DEFAULT_RANGE,
-  serializeStateToUrlParam,
-  parseUrlState,
-  updateHistory,
+  buildQueryTransaction,
   clearHistory,
-  hasNonEmptyQuery,
-  instanceOfDataQueryError,
-  getValueWithRefId,
+  DEFAULT_RANGE,
   getFirstQueryErrorWithoutRefId,
   getRefIds,
+  getValueWithRefId,
+  hasNonEmptyQuery,
+  parseUrlState,
+  refreshIntervalToSortOrder,
+  updateHistory,
+  getExploreUrl,
+  GetExploreUrlArguments,
 } from './explore';
-import { ExploreUrlState } from 'app/types/explore';
 import store from 'app/core/store';
-import { DataQueryError, LogsDedupStrategy } from '@grafana/ui';
+import { DataQueryError, dateTime, LogsDedupStrategy, ExploreUrlState, LogsSortOrder } from '@grafana/data';
+import { RefreshPicker } from '@grafana/ui';
+import { serializeStateToUrlParam } from '@grafana/data/src/utils/url';
 
 const DEFAULT_EXPLORE_STATE: ExploreUrlState = {
-  datasource: null,
+  datasource: '',
   queries: [],
   range: DEFAULT_RANGE,
   ui: {
@@ -24,6 +27,7 @@ const DEFAULT_EXPLORE_STATE: ExploreUrlState = {
     showingLogs: true,
     dedupStrategy: LogsDedupStrategy.none,
   },
+  originPanelId: undefined,
 };
 
 describe('state functions', () => {
@@ -50,10 +54,26 @@ describe('state functions', () => {
     });
 
     it('returns a valid Explore state from a compact URL parameter', () => {
-      const paramValue = '%5B"now-1h","now","Local","5m",%7B"expr":"metric"%7D,"ui"%5D';
+      // ["now-1h","now","Local",{"expr":"metric"},{"ui":[true,true,true,"none"]}]
+      const paramValue =
+        '%5B"now-1h","now","Local",%7B"expr":"metric"%7D,%7B%22ui%22:%5Btrue,true,true,%22none%22%5D%7D%5D';
       expect(parseUrlState(paramValue)).toMatchObject({
         datasource: 'Local',
         queries: [{ expr: 'metric' }],
+        range: {
+          from: 'now-1h',
+          to: 'now',
+        },
+      });
+    });
+
+    it('should return queries if queryType is present in the url', () => {
+      // ["now-1h","now","x-ray-datasource",{"queryType":"getTraceSummaries"},{"ui":[true,true,true,"none"]}]
+      const paramValue =
+        '%5B"now-1h","now","x-ray-datasource",%7B"queryType":"getTraceSummaries"%7D,%7B%22ui%22:%5Btrue,true,true,%22none%22%5D%7D%5D';
+      expect(parseUrlState(paramValue)).toMatchObject({
+        datasource: 'x-ray-datasource',
+        queries: [{ queryType: 'getTraceSummaries' }],
         range: {
           from: 'now-1h',
           to: 'now',
@@ -158,6 +178,32 @@ describe('state functions', () => {
   });
 });
 
+describe('getExploreUrl', () => {
+  const args = ({
+    panel: {
+      getSavedId: () => 1,
+    },
+    panelTargets: [{ refId: 'A', expr: 'query1', legendFormat: 'legendFormat1' }],
+    panelDatasource: {
+      name: 'testDataSource',
+      meta: {
+        id: '1',
+      },
+    },
+    datasourceSrv: {
+      get: jest.fn(),
+      getDataSourceById: jest.fn(),
+    },
+    timeSrv: {
+      timeRangeForUrl: () => '1',
+    },
+  } as unknown) as GetExploreUrlArguments;
+
+  it('should omit legendFormat in explore url', () => {
+    expect(getExploreUrl(args).then(data => expect(data).not.toMatch(/legendFormat1/g)));
+  });
+});
+
 describe('updateHistory()', () => {
   const datasourceId = 'myDatasource';
   const key = `grafana.explore.history.${datasourceId}`;
@@ -181,11 +227,11 @@ describe('updateHistory()', () => {
 
 describe('hasNonEmptyQuery', () => {
   test('should return true if one query is non-empty', () => {
-    expect(hasNonEmptyQuery([{ refId: '1', key: '2', expr: 'foo' }])).toBeTruthy();
+    expect(hasNonEmptyQuery([{ refId: '1', key: '2', context: 'explore', expr: 'foo' }])).toBeTruthy();
   });
 
   test('should return false if query is empty', () => {
-    expect(hasNonEmptyQuery([{ refId: '1', key: '2' }])).toBeFalsy();
+    expect(hasNonEmptyQuery([{ refId: '1', key: '2', context: 'panel' }])).toBeFalsy();
   });
 
   test('should return false if no queries exist', () => {
@@ -193,46 +239,22 @@ describe('hasNonEmptyQuery', () => {
   });
 });
 
-describe('instanceOfDataQueryError', () => {
-  describe('when called with a DataQueryError', () => {
-    it('then it should return true', () => {
-      const error: DataQueryError = {
-        message: 'A message',
-        status: '200',
-        statusText: 'Ok',
-      };
-      const result = instanceOfDataQueryError(error);
-
-      expect(result).toBe(true);
-    });
-  });
-
-  describe('when called with a non DataQueryError', () => {
-    it('then it should return false', () => {
-      const error = {};
-      const result = instanceOfDataQueryError(error);
-
-      expect(result).toBe(false);
-    });
-  });
-});
-
 describe('hasRefId', () => {
   describe('when called with a null value', () => {
-    it('then it should return null', () => {
-      const input = null;
+    it('then it should return undefined', () => {
+      const input: any = null;
       const result = getValueWithRefId(input);
 
-      expect(result).toBeNull();
+      expect(result).toBeUndefined();
     });
   });
 
   describe('when called with a non object value', () => {
-    it('then it should return null', () => {
+    it('then it should return undefined', () => {
       const input = 123;
       const result = getValueWithRefId(input);
 
-      expect(result).toBeNull();
+      expect(result).toBeUndefined();
     });
   });
 
@@ -266,11 +288,11 @@ describe('hasRefId', () => {
 
 describe('getFirstQueryErrorWithoutRefId', () => {
   describe('when called with a null value', () => {
-    it('then it should return null', () => {
-      const errors: DataQueryError[] = null;
+    it('then it should return undefined', () => {
+      const errors: DataQueryError[] | undefined = undefined;
       const result = getFirstQueryErrorWithoutRefId(errors);
 
-      expect(result).toBeNull();
+      expect(result).toBeUndefined();
     });
   });
 
@@ -301,7 +323,7 @@ describe('getFirstQueryErrorWithoutRefId', () => {
 describe('getRefIds', () => {
   describe('when called with a null value', () => {
     it('then it should return empty array', () => {
-      const input = null;
+      const input: any = null;
       const result = getRefIds(input);
 
       expect(result).toEqual([]);
@@ -351,5 +373,63 @@ describe('getRefIds', () => {
 
       expect(result).toEqual(['B', 'X', 'A']);
     });
+  });
+});
+
+describe('refreshIntervalToSortOrder', () => {
+  describe('when called with live option', () => {
+    it('then it should return ascending', () => {
+      const result = refreshIntervalToSortOrder(RefreshPicker.liveOption.value);
+
+      expect(result).toBe(LogsSortOrder.Ascending);
+    });
+  });
+
+  describe('when called with off option', () => {
+    it('then it should return descending', () => {
+      const result = refreshIntervalToSortOrder(RefreshPicker.offOption.value);
+
+      expect(result).toBe(LogsSortOrder.Descending);
+    });
+  });
+
+  describe('when called with 5s option', () => {
+    it('then it should return descending', () => {
+      const result = refreshIntervalToSortOrder('5s');
+
+      expect(result).toBe(LogsSortOrder.Descending);
+    });
+  });
+
+  describe('when called with undefined', () => {
+    it('then it should return descending', () => {
+      const result = refreshIntervalToSortOrder(undefined);
+
+      expect(result).toBe(LogsSortOrder.Descending);
+    });
+  });
+});
+
+describe('when buildQueryTransaction', () => {
+  it('it should calculate interval based on time range', () => {
+    const queries = [{ refId: 'A' }];
+    const queryOptions = { maxDataPoints: 1000, minInterval: '15s' };
+    const range = { from: dateTime().subtract(1, 'd'), to: dateTime(), raw: { from: '1h', to: '1h' } };
+    const transaction = buildQueryTransaction(queries, queryOptions, range, false);
+    expect(transaction.request.intervalMs).toEqual(60000);
+  });
+  it('it should calculate interval taking minInterval into account', () => {
+    const queries = [{ refId: 'A' }];
+    const queryOptions = { maxDataPoints: 1000, minInterval: '15s' };
+    const range = { from: dateTime().subtract(1, 'm'), to: dateTime(), raw: { from: '1h', to: '1h' } };
+    const transaction = buildQueryTransaction(queries, queryOptions, range, false);
+    expect(transaction.request.intervalMs).toEqual(15000);
+  });
+  it('it should calculate interval taking maxDataPoints into account', () => {
+    const queries = [{ refId: 'A' }];
+    const queryOptions = { maxDataPoints: 10, minInterval: '15s' };
+    const range = { from: dateTime().subtract(1, 'd'), to: dateTime(), raw: { from: '1h', to: '1h' } };
+    const transaction = buildQueryTransaction(queries, queryOptions, range, false);
+    expect(transaction.request.interval).toEqual('2h');
   });
 });

@@ -26,6 +26,7 @@ func init() {
 		Type:        "telegram",
 		Name:        "Telegram",
 		Description: "Sends notifications to Telegram",
+		Heading:     "Telegram API settings",
 		Factory:     NewTelegramNotifier,
 		OptionsTemplate: `
       <h3 class="page-heading">Telegram API settings</h3>
@@ -48,8 +49,25 @@ func init() {
         </info-popover>
       </div>
     `,
+		Options: []alerting.NotifierOption{
+			{
+				Label:        "BOT API Token",
+				Element:      alerting.ElementTypeInput,
+				InputType:    alerting.InputTypeText,
+				Placeholder:  "Telegram BOT API Token",
+				PropertyName: "bottoken",
+				Required:     true,
+			},
+			{
+				Label:        "Chat ID",
+				Element:      alerting.ElementTypeInput,
+				InputType:    alerting.InputTypeText,
+				Description:  "Integer Telegram Chat Identifier",
+				PropertyName: "chatid",
+				Required:     true,
+			},
+		},
 	})
-
 }
 
 // TelegramNotifier is responsible for sending
@@ -89,40 +107,47 @@ func NewTelegramNotifier(model *models.AlertNotification) (alerting.Notifier, er
 	}, nil
 }
 
-func (tn *TelegramNotifier) buildMessage(evalContext *alerting.EvalContext, sendImageInline bool) *models.SendWebhookSync {
+func (tn *TelegramNotifier) buildMessage(evalContext *alerting.EvalContext, sendImageInline bool) (*models.SendWebhookSync, error) {
 	if sendImageInline {
 		cmd, err := tn.buildMessageInlineImage(evalContext)
 		if err == nil {
-			return cmd
+			return cmd, nil
 		}
+
 		tn.log.Error("Could not generate Telegram message with inline image.", "err", err)
 	}
 
 	return tn.buildMessageLinkedImage(evalContext)
 }
 
-func (tn *TelegramNotifier) buildMessageLinkedImage(evalContext *alerting.EvalContext) *models.SendWebhookSync {
+func (tn *TelegramNotifier) buildMessageLinkedImage(evalContext *alerting.EvalContext) (*models.SendWebhookSync, error) {
 	message := fmt.Sprintf("<b>%s</b>\nState: %s\nMessage: %s\n", evalContext.GetNotificationTitle(), evalContext.Rule.Name, evalContext.Rule.Message)
 
-	ruleURL, err := evalContext.GetRuleUrl()
+	ruleURL, err := evalContext.GetRuleURL()
 	if err == nil {
-		message = message + fmt.Sprintf("URL: %s\n", ruleURL)
+		message += fmt.Sprintf("URL: %s\n", ruleURL)
 	}
 
-	if evalContext.ImagePublicUrl != "" {
-		message = message + fmt.Sprintf("Image: %s\n", evalContext.ImagePublicUrl)
+	if evalContext.ImagePublicURL != "" {
+		message += fmt.Sprintf("Image: %s\n", evalContext.ImagePublicURL)
 	}
 
 	metrics := generateMetricsMessage(evalContext)
 	if metrics != "" {
-		message = message + fmt.Sprintf("\n<i>Metrics:</i>%s", metrics)
+		message += fmt.Sprintf("\n<i>Metrics:</i>%s", metrics)
 	}
 
-	cmd := tn.generateTelegramCmd(message, "text", "sendMessage", func(w *multipart.Writer) {
-		fw, _ := w.CreateFormField("parse_mode")
-		fw.Write([]byte("html"))
+	return tn.generateTelegramCmd(message, "text", "sendMessage", func(w *multipart.Writer) {
+		fw, err := w.CreateFormField("parse_mode")
+		if err != nil {
+			tn.log.Error("Failed to create form file", "err", err)
+			return
+		}
+
+		if _, err := fw.Write([]byte("html")); err != nil {
+			tn.log.Error("Failed to write to form field", "err", err)
+		}
 	})
-	return cmd
 }
 
 func (tn *TelegramNotifier) buildMessageInlineImage(evalContext *alerting.EvalContext) (*models.SendWebhookSync, error) {
@@ -130,6 +155,10 @@ func (tn *TelegramNotifier) buildMessageInlineImage(evalContext *alerting.EvalCo
 	var err error
 
 	imageFile, err = os.Open(evalContext.ImageOnDiskPath)
+	if err != nil {
+		return nil, err
+	}
+
 	defer func() {
 		err := imageFile.Close()
 		if err != nil {
@@ -137,11 +166,7 @@ func (tn *TelegramNotifier) buildMessageInlineImage(evalContext *alerting.EvalCo
 		}
 	}()
 
-	if err != nil {
-		return nil, err
-	}
-
-	ruleURL, err := evalContext.GetRuleUrl()
+	ruleURL, err := evalContext.GetRuleURL()
 	if err != nil {
 		return nil, err
 	}
@@ -149,22 +174,38 @@ func (tn *TelegramNotifier) buildMessageInlineImage(evalContext *alerting.EvalCo
 	metrics := generateMetricsMessage(evalContext)
 	message := generateImageCaption(evalContext, ruleURL, metrics)
 
-	cmd := tn.generateTelegramCmd(message, "caption", "sendPhoto", func(w *multipart.Writer) {
-		fw, _ := w.CreateFormFile("photo", evalContext.ImageOnDiskPath)
-		io.Copy(fw, imageFile)
+	return tn.generateTelegramCmd(message, "caption", "sendPhoto", func(w *multipart.Writer) {
+		fw, err := w.CreateFormFile("photo", evalContext.ImageOnDiskPath)
+		if err != nil {
+			tn.log.Error("Failed to create form file", "err", err)
+			return
+		}
+
+		if _, err := io.Copy(fw, imageFile); err != nil {
+			tn.log.Error("Failed to write to form file", "err", err)
+		}
 	})
-	return cmd, nil
 }
 
-func (tn *TelegramNotifier) generateTelegramCmd(message string, messageField string, apiAction string, extraConf func(writer *multipart.Writer)) *models.SendWebhookSync {
+func (tn *TelegramNotifier) generateTelegramCmd(message string, messageField string, apiAction string, extraConf func(writer *multipart.Writer)) (*models.SendWebhookSync, error) {
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 
-	fw, _ := w.CreateFormField("chat_id")
-	fw.Write([]byte(tn.ChatID))
+	fw, err := w.CreateFormField("chat_id")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fw.Write([]byte(tn.ChatID)); err != nil {
+		return nil, err
+	}
 
-	fw, _ = w.CreateFormField(messageField)
-	fw.Write([]byte(message))
+	fw, err = w.CreateFormField(messageField)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fw.Write([]byte(message)); err != nil {
+		return nil, err
+	}
 
 	extraConf(w)
 
@@ -181,7 +222,7 @@ func (tn *TelegramNotifier) generateTelegramCmd(message string, messageField str
 			"Content-Type": w.FormDataContentType(),
 		},
 	}
-	return cmd
+	return cmd, nil
 }
 
 func generateMetricsMessage(evalContext *alerting.EvalContext) string {
@@ -205,7 +246,6 @@ func generateImageCaption(evalContext *alerting.EvalContext, ruleURL string, met
 
 	if len(message) > captionLengthLimit {
 		message = message[0:captionLengthLimit]
-
 	}
 
 	if len(ruleURL) > 0 {
@@ -225,17 +265,21 @@ func appendIfPossible(message string, extra string, sizeLimit int) string {
 	if len(extra)+len(message) <= sizeLimit {
 		return message + extra
 	}
-	log.Debug("Line too long for image caption. value: %s", extra)
+	log.Debugf("Line too long for image caption. value: %s", extra)
 	return message
 }
 
 // Notify send an alert notification to Telegram.
 func (tn *TelegramNotifier) Notify(evalContext *alerting.EvalContext) error {
 	var cmd *models.SendWebhookSync
-	if evalContext.ImagePublicUrl == "" && tn.UploadImage {
-		cmd = tn.buildMessage(evalContext, true)
+	var err error
+	if evalContext.ImagePublicURL == "" && tn.UploadImage {
+		cmd, err = tn.buildMessage(evalContext, true)
 	} else {
-		cmd = tn.buildMessage(evalContext, false)
+		cmd, err = tn.buildMessage(evalContext, false)
+	}
+	if err != nil {
+		return err
 	}
 
 	if err := bus.DispatchCtx(evalContext.Ctx, cmd); err != nil {

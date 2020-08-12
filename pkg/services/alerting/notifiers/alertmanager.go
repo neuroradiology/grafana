@@ -3,6 +3,7 @@ package notifiers
 import (
 	"context"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/grafana/grafana/pkg/bus"
@@ -17,41 +18,102 @@ func init() {
 		Type:        "prometheus-alertmanager",
 		Name:        "Prometheus Alertmanager",
 		Description: "Sends alert to Prometheus Alertmanager",
+		Heading:     "Alertmanager settings",
 		Factory:     NewAlertmanagerNotifier,
 		OptionsTemplate: `
       <h3 class="page-heading">Alertmanager settings</h3>
-      <div class="gf-form">
-        <span class="gf-form-label width-10">Url</span>
-        <input type="text" required class="gf-form-input max-width-26" ng-model="ctrl.model.settings.url" placeholder="http://localhost:9093"></input>
+		<div class="gf-form max-width-30">
+            <span class="gf-form-label width-10">Url(s)</span>
+            <input type="text" required class="gf-form-input max-width-30" ng-model="ctrl.model.settings.url" placeholder="http://localhost:9093"></input>
+            <info-popover mode="right-absolute">
+              As specified in Alertmanager documentation, do not specify a load balancer here. Enter all your Alertmanager URLs comma-separated.
+            </info-popover>
+		</div>
+		<div class="gf-form max-width-30">
+        	<span class="gf-form-label width-10">Basic Auth User</span>
+            <input type="text" class="gf-form-input max-width-30" ng-model="ctrl.model.settings.basicAuthUser" placeholder=""></input>
+		</div>
+        <div class="gf-form max-width-30">
+            <span class="gf-form-label width-10">Basic Auth Password</span>
+            <div class="gf-form gf-form--grow" ng-if="!ctrl.model.secureFields.basicAuthPassword">
+                <input type="text"
+                    class="gf-form-input max-width-30"
+                    ng-init="ctrl.model.secureSettings.basicAuthPassword = ctrl.model.settings.basicAuthPassword || null; ctrl.model.settings.basicAuthPassword = null;"
+                    ng-model="ctrl.model.secureSettings.basicAuthPassword"
+                    data-placement="right">
+                </input>
+            </div>
+            <div class="gf-form" ng-if="ctrl.model.secureFields.basicAuthPassword">
+                <input type="text" class="gf-form-input max-width-18" disabled="disabled" value="configured" />
+                <a class="btn btn-secondary gf-form-btn" href="#" ng-click="ctrl.model.secureFields.basicAuthPassword = false">reset</a>
+            </div>
+        </div>
       </div>
     `,
+		Options: []alerting.NotifierOption{
+			{
+				Label:        "Url",
+				Element:      alerting.ElementTypeInput,
+				InputType:    alerting.InputTypeText,
+				Description:  "As specified in Alertmanager documentation, do not specify a load balancer here. Enter all your Alertmanager URLs comma-separated.",
+				Placeholder:  "http://localhost:9093",
+				PropertyName: "url",
+				Required:     true,
+			},
+			{
+				Label:        "Basic Auth User",
+				Element:      alerting.ElementTypeInput,
+				InputType:    alerting.InputTypeText,
+				PropertyName: "basicAuthUser",
+			},
+			{
+				Label:        "Basic Auth Password",
+				Element:      alerting.ElementTypeInput,
+				InputType:    alerting.InputTypePassword,
+				PropertyName: "basicAuthPassword",
+			},
+		},
 	})
 }
 
 // NewAlertmanagerNotifier returns a new Alertmanager notifier
 func NewAlertmanagerNotifier(model *models.AlertNotification) (alerting.Notifier, error) {
-	url := model.Settings.Get("url").MustString()
-	if url == "" {
+	urlString := model.Settings.Get("url").MustString()
+	if urlString == "" {
 		return nil, alerting.ValidationError{Reason: "Could not find url property in settings"}
 	}
 
+	var url []string
+	for _, u := range strings.Split(urlString, ",") {
+		u = strings.TrimSpace(u)
+		if u != "" {
+			url = append(url, u)
+		}
+	}
+	basicAuthUser := model.Settings.Get("basicAuthUser").MustString()
+	basicAuthPassword := model.DecryptedValue("basicAuthPassword", model.Settings.Get("basicAuthPassword").MustString())
+
 	return &AlertmanagerNotifier{
-		NotifierBase: NewNotifierBase(model),
-		URL:          url,
-		log:          log.New("alerting.notifier.prometheus-alertmanager"),
+		NotifierBase:      NewNotifierBase(model),
+		URL:               url,
+		BasicAuthUser:     basicAuthUser,
+		BasicAuthPassword: basicAuthPassword,
+		log:               log.New("alerting.notifier.prometheus-alertmanager"),
 	}, nil
 }
 
 // AlertmanagerNotifier sends alert notifications to the alert manager
 type AlertmanagerNotifier struct {
 	NotifierBase
-	URL string
-	log log.Logger
+	URL               []string
+	BasicAuthUser     string
+	BasicAuthPassword string
+	log               log.Logger
 }
 
 // ShouldNotify returns true if the notifiers should be used depending on state
 func (am *AlertmanagerNotifier) ShouldNotify(ctx context.Context, evalContext *alerting.EvalContext, notificationState *models.AlertNotificationState) bool {
-	am.log.Debug("Should notify", "ruleId", evalContext.Rule.Id, "state", evalContext.Rule.State, "previousState", evalContext.PrevAlertState)
+	am.log.Debug("Should notify", "ruleId", evalContext.Rule.ID, "state", evalContext.Rule.State, "previousState", evalContext.PrevAlertState)
 
 	// Do not notify when we become OK for the first time.
 	if (evalContext.PrevAlertState == models.AlertStatePending) && (evalContext.Rule.State == models.AlertStateOK) {
@@ -89,11 +151,11 @@ func (am *AlertmanagerNotifier) createAlert(evalContext *alerting.EvalContext, m
 	if description != "" {
 		alertJSON.SetPath([]string{"annotations", "description"}, description)
 	}
-	if evalContext.ImagePublicUrl != "" {
-		alertJSON.SetPath([]string{"annotations", "image"}, evalContext.ImagePublicUrl)
+	if evalContext.ImagePublicURL != "" {
+		alertJSON.SetPath([]string{"annotations", "image"}, evalContext.ImagePublicURL)
 	}
 
-	// Labels (from metrics tags + mandatory alertname).
+	// Labels (from metrics tags + AlertRuleTags + mandatory alertname).
 	tags := make(map[string]string)
 	if match != nil {
 		if len(match.Tags) == 0 {
@@ -104,6 +166,9 @@ func (am *AlertmanagerNotifier) createAlert(evalContext *alerting.EvalContext, m
 			}
 		}
 	}
+	for _, tag := range evalContext.Rule.AlertRuleTags {
+		tags[tag.Key] = tag.Value
+	}
 	tags["alertname"] = evalContext.Rule.Name
 	alertJSON.Set("labels", tags)
 	return alertJSON
@@ -111,9 +176,9 @@ func (am *AlertmanagerNotifier) createAlert(evalContext *alerting.EvalContext, m
 
 // Notify sends alert notifications to the alert manager
 func (am *AlertmanagerNotifier) Notify(evalContext *alerting.EvalContext) error {
-	am.log.Info("Sending Alertmanager alert", "ruleId", evalContext.Rule.Id, "notification", am.Name)
+	am.log.Info("Sending Alertmanager alert", "ruleId", evalContext.Rule.ID, "notification", am.Name)
 
-	ruleURL, err := evalContext.GetRuleUrl()
+	ruleURL, err := evalContext.GetRuleURL()
 	if err != nil {
 		am.log.Error("Failed get rule link", "error", err)
 		return err
@@ -135,15 +200,19 @@ func (am *AlertmanagerNotifier) Notify(evalContext *alerting.EvalContext) error 
 	bodyJSON := simplejson.NewFromAny(alerts)
 	body, _ := bodyJSON.MarshalJSON()
 
-	cmd := &models.SendWebhookSync{
-		Url:        am.URL + "/api/v1/alerts",
-		HttpMethod: "POST",
-		Body:       string(body),
-	}
+	for _, url := range am.URL {
+		cmd := &models.SendWebhookSync{
+			Url:        strings.TrimSuffix(url, "/") + "/api/v1/alerts",
+			User:       am.BasicAuthUser,
+			Password:   am.BasicAuthPassword,
+			HttpMethod: "POST",
+			Body:       string(body),
+		}
 
-	if err := bus.DispatchCtx(evalContext.Ctx, cmd); err != nil {
-		am.log.Error("Failed to send alertmanager", "error", err, "alertmanager", am.Name)
-		return err
+		if err := bus.DispatchCtx(evalContext.Ctx, cmd); err != nil {
+			am.log.Error("Failed to send alertmanager", "error", err, "alertmanager", am.Name, "url", url)
+			return err
+		}
 	}
 
 	return nil

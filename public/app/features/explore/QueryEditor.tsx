@@ -2,14 +2,13 @@
 import React, { PureComponent } from 'react';
 
 // Services
-import { getAngularLoader, AngularComponent } from 'app/core/services/AngularLoader';
-import { getTimeSrv } from 'app/features/dashboard/services/TimeSrv';
+import { getAngularLoader, AngularComponent } from '@grafana/runtime';
 
 // Types
 import { Emitter } from 'app/core/utils/emitter';
-import { DataQuery, TimeRange } from '@grafana/ui';
+import { DataQuery } from '@grafana/data';
+import { TimeRange } from '@grafana/data';
 import 'app/features/plugins/plugin_loader';
-import { dateTime } from '@grafana/ui/src/utils/moment_wrapper';
 
 interface QueryEditorProps {
   error?: any;
@@ -19,19 +18,20 @@ interface QueryEditorProps {
   initialQuery: DataQuery;
   exploreEvents: Emitter;
   range: TimeRange;
+  textEditModeEnabled?: boolean;
 }
 
 export default class QueryEditor extends PureComponent<QueryEditorProps, any> {
   element: any;
   component: AngularComponent;
+  angularScope: any;
 
   async componentDidMount() {
     if (!this.element) {
       return;
     }
 
-    const { datasource, initialQuery, exploreEvents, range } = this.props;
-    this.initTimeSrv(range);
+    const { datasource, initialQuery, exploreEvents } = this.props;
 
     const loader = getAngularLoader();
     const template = '<plugin-component type="query-ctrl"> </plugin-component>';
@@ -42,13 +42,13 @@ export default class QueryEditor extends PureComponent<QueryEditorProps, any> {
         target,
         refresh: () => {
           setTimeout(() => {
-            this.props.onQueryChange(target);
-            this.props.onExecuteQuery();
+            this.props.onQueryChange?.(target);
+            this.props.onExecuteQuery?.();
           }, 1);
         },
         onQueryChange: () => {
           setTimeout(() => {
-            this.props.onQueryChange(target);
+            this.props.onQueryChange?.(target);
           }, 1);
         },
         events: exploreEvents,
@@ -58,17 +58,28 @@ export default class QueryEditor extends PureComponent<QueryEditorProps, any> {
     };
 
     this.component = loader.load(this.element, scopeProps, template);
+    this.angularScope = scopeProps.ctrl;
+
     setTimeout(() => {
-      this.props.onQueryChange(target);
-      this.props.onExecuteQuery();
+      this.props.onQueryChange?.(target);
+      this.props.onExecuteQuery?.();
     }, 1);
   }
 
   componentDidUpdate(prevProps: QueryEditorProps) {
-    if (prevProps.error !== this.props.error && this.component) {
-      // Some query controllers listen to data error events and need a digest
-      // for some reason this needs to be done in next tick
-      setTimeout(this.component.digest);
+    const hasToggledEditorMode = prevProps.textEditModeEnabled !== this.props.textEditModeEnabled;
+    const hasNewError = prevProps.error !== this.props.error;
+
+    if (this.component) {
+      if (hasToggledEditorMode && this.angularScope && this.angularScope.toggleEditorMode) {
+        this.angularScope.toggleEditorMode();
+      }
+
+      if (hasNewError || hasToggledEditorMode) {
+        // Some query controllers listen to data error events and need a digest
+        // for some reason this needs to be done in next tick
+        setTimeout(this.component.digest);
+      }
     }
   }
 
@@ -76,19 +87,6 @@ export default class QueryEditor extends PureComponent<QueryEditorProps, any> {
     if (this.component) {
       this.component.destroy();
     }
-  }
-
-  initTimeSrv(range: TimeRange) {
-    const timeSrv = getTimeSrv();
-    timeSrv.init({
-      time: {
-        from: dateTime(range.from),
-        to: dateTime(range.to),
-      },
-      refresh: false,
-      getTimezone: () => 'utc',
-      timeRangeUpdated: () => console.log('refreshDashboard!'),
-    });
   }
 
   render() {
